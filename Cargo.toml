@@ -1,0 +1,23 @@
+[package]
+name = "glint"
+version = "0.1.0"
+edition = "2024"
+
+# The spec doctrine keeps requirement tests beside the spec they trace to.
+[[test]]
+name = "luid_parse"
+path = "specs/glint/tests/luid_parse.rs"
+
+[[test]]
+name = "config_parse"
+path = "specs/glint/tests/config_parse.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Performance", "Win32_Graphics_DXCore", "Win32_System_Power", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Wdk_Graphics_Direct3D", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_HiDpi", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_System_Com", "Win32_Security"] }
