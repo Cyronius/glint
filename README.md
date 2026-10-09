@@ -6,9 +6,9 @@ with the numbers behind it. Pick which measurements to show from the right
 click menu; both the icon and the window follow. The window stays open and on
 top until it is minimized, and a hidden window costs almost nothing.
 
-![The glint tray icon among other notification area icons](docs/tray.png)
+![The glint window and its tray icon climbing to red under load, then falling back to idle](docs/demo.gif)
 
-Five strips, top to bottom: CPU, memory, GPU, NPU, disk activity. 
+The tray strip under the window is shown at 3x. Five strips, top to bottom: CPU, memory, GPU, NPU, disk activity. 
 Each fills to its current percentage and turns amber at 80% and red at 95%. Hover for the numbers.
 
 ![Glint window](docs/screenshot.png)
