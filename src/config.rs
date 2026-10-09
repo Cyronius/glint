@@ -12,7 +12,34 @@ pub struct Config {
     /// The window position, in screen pixels. `None` means "place it above
     /// the tray icon".
     pub position: Option<(i32, i32)>,
+    pub show: Show,
 }
+
+/// Which measurements the window draws (GLINT-KPI-TOGGLE).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Show {
+    pub cpu: bool,
+    pub memory: bool,
+    pub gpu: bool,
+    pub npu: bool,
+    pub disk_activity: bool,
+    pub disk_space: bool,
+}
+
+impl Default for Show {
+    /// A new install shows everything the hardware has.
+    fn default() -> Self {
+        Self {
+            cpu: true,
+            memory: true,
+            gpu: true,
+            npu: true,
+            disk_activity: true,
+            disk_space: true,
+        }
+    }
+}
+
 
 /// `%APPDATA%\glint\config.json`, or `None` when `APPDATA` is unset.
 pub fn path() -> Option<PathBuf> {
@@ -45,7 +72,16 @@ impl Config {
             (Some(x), Some(y)) => Some((x, y)),
             _ => None,
         };
-        Self { position }
+        let fallback = Show::default();
+        let show = Show {
+            cpu: read_bool(text, "cpu").unwrap_or(fallback.cpu),
+            memory: read_bool(text, "memory").unwrap_or(fallback.memory),
+            gpu: read_bool(text, "gpu").unwrap_or(fallback.gpu),
+            npu: read_bool(text, "npu").unwrap_or(fallback.npu),
+            disk_activity: read_bool(text, "diskActivity").unwrap_or(fallback.disk_activity),
+            disk_space: read_bool(text, "diskSpace").unwrap_or(fallback.disk_space),
+        };
+        Self { position, show }
     }
 
     pub fn save(&self) {
@@ -53,10 +89,16 @@ impl Config {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let text = match self.position {
-            Some((x, y)) => format!("{{\n  \"x\": {x},\n  \"y\": {y}\n}}\n"),
-            None => "{}\n".to_owned(),
-        };
+        let mut text = String::from("{\n");
+        if let Some((x, y)) = self.position {
+            text.push_str(&format!("  \"x\": {x},\n  \"y\": {y},\n"));
+        }
+        let show = self.show;
+        text.push_str(&format!(
+            "  \"cpu\": {},\n  \"memory\": {},\n  \"gpu\": {},\n  \"npu\": {},\n  \"diskActivity\": {},\n  \"diskSpace\": {}\n",
+            show.cpu, show.memory, show.gpu, show.npu, show.disk_activity, show.disk_space
+        ));
+        text.push_str("}\n");
         let _ = std::fs::write(&path, text);
     }
 }
@@ -68,6 +110,17 @@ fn value_after<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let rest = &text[at + quoted.len()..];
     let colon = rest.find(':')?;
     Some(rest[colon + 1..].trim_start())
+}
+
+fn read_bool(text: &str, key: &str) -> Option<bool> {
+    let value = value_after(text, key)?;
+    if value.starts_with("true") {
+        Some(true)
+    } else if value.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn read_int(text: &str, key: &str) -> Option<i32> {

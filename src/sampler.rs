@@ -246,6 +246,15 @@ impl Sampler {
         self.npu_luid.is_some()
     }
 
+    /// True when a graphics adapter was found at startup.
+    ///
+    /// The layout asks this rather than `metrics.gpu.is_some()`, which is
+    /// `None` on the unprimed first tick and would open the window one row
+    /// short before growing a second later.
+    pub fn has_gpu(&self) -> bool {
+        self.gpu_luid.is_some()
+    }
+
     /// Sample every counter once.
     ///
     /// The first call after `new` or `rebuild` returns metrics with zeros for

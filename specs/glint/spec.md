@@ -8,11 +8,13 @@ Home repo: `glint`. Requirement prefix: `SG`.
 
 ## Scope
 
-In scope: the five resource rows, the tray icon, the popup window, the minimize
-button, disk space, and start with Windows.
+In scope: the five resource rows, the live tray icon, the popup window, the
+minimize button, disk space, choosing which measurements show, and start with
+Windows.
 
 Out of scope: per-process lists, temperatures, fan speeds, a taskbar AppBar,
-and history beyond 60 seconds.
+a Windows 11 Widgets Board provider (see **Why not the Widgets Board**), and
+history beyond 60 seconds.
 
 ## Architecture
 
@@ -24,6 +26,7 @@ and history beyond 60 seconds.
 | Adapter discovery through DXCore (spike only) | `src/adapters.rs` |
 | Metric sampling | `src/sampler.rs` |
 | GDI drawing | `src/render.rs` |
+| Tray icon pixels | `src/trayicon.rs` |
 | Window, tray icon, interaction | `src/window.rs` |
 | Settings persistence | `src/config.rs` |
 
@@ -90,24 +93,242 @@ An old `pinned` key in the config file is ignored.
 **Applies to:** glint
 **Verification:** manual
 
-While the window is hidden, the app shall poll at most once per 10 seconds and
-shall not render. While the window is visible, it shall poll once per second.
+While the window is hidden, the app shall poll at most once per 2 seconds and
+shall not render the window. While the window is visible, it shall poll once
+per second.
+
+The hidden rate was 10 seconds until GLINT-TRAY-BARS made the tray icon live.
+A 10-second-old bar is not a glanceable reading, and the icon is on screen
+whether the window is or not. The cost of the change is bounded by rebuilding
+the icon only when it would actually look different.
 
 **Verification (manual):**
 
 1. Start the app and leave the window hidden.
 2. In Task Manager, watch the `glint` process for 60 seconds.
-3. CPU shall read 0%, and memory shall stay flat.
+3. CPU shall read 0.0%, and memory shall stay flat.
 
 Measured on 2026-10-05 (AMD Ryzen AI 9 HX PRO 370, Windows 11 26200):
 
 | State | Working set | Private bytes | CPU |
 |-------|-------------|---------------|-----|
-| Hidden | 14.8 MB | 6.3 MB | 0.000% of one core over 30 s |
+| Hidden, 10 s poll, static icon | 14.8 MB | 6.3 MB | 0.000% of one core over 30 s |
 | Visible | 20.0 MB | 6.6 MB | 0.391% of one core over 20 s |
+
+Re-measured on 2026-10-08 with the live tray icon and a 2 s hidden poll, while
+another process held a core busy, so the bars changed on most ticks:
+
+| State | Working set | Private bytes | CPU |
+|-------|-------------|---------------|-----|
+| Hidden, 2 s poll, live icon | 15.6 MB | 6.18 MB | 0.052% of one core over 30 s |
+
+Idle cost is no longer literally zero, and this requirement no longer claims
+it is. 0.05% of one core is below what Task Manager will show.
 
 Working set includes shared system libraries. Private bytes is the app's own
 memory, and it is the number to watch.
+
+---
+
+### GLINT-TRAY-BARS: The tray icon shows the live reading
+
+**Applies to:** glint
+**Verification:** manual
+
+The tray icon shall carry one horizontal strip per measurement, stacked in the
+order the window draws its rows, each filling left to right to the current
+percentage against a dim track. Each strip keeps its row's hue and takes its
+GLINT-ALERT-COLOR colour at the thresholds.
+
+The icon is the only glint surface that is always on screen, so it is where a
+glanceable reading belongs. The Windows 11 Widgets Board cannot serve this;
+see **Why not the Widgets Board** below.
+
+The strips follow the menu (GLINT-KPI-TOGGLE), so hiding a row hides its strip
+and the rest grow thicker. Disk space has no strip: it is per drive, so it has
+no single value a bar could show. With no measurement selected the icon falls
+back to the four-bar mark, so it never becomes an empty square the user cannot
+find.
+
+**The hover text names the strips**, one per line in the same top-to-bottom
+order, because the icon has nothing else to label them with:
+
+```
+CPU   12%
+MEM   39%
+GPU    0%
+NPU    0%
+DISK   8%
+```
+
+Both come from one list in `src/trayicon.rs`, so the icon and the hover text
+cannot drift apart.
+
+`NIF_SHOWTIP` must be set on both the add and the modify.
+`NOTIFYICON_VERSION_4` suppresses the standard tooltip unless it is asked for,
+expecting the app to draw its own pop-up. glint draws none, so without that
+flag the hover text never appears at all. This was silently true of the older
+tooltip as well.
+
+#### Why 16 pixels, drawn native
+
+The displayed icon is **16 x 16** at 100% scaling, measured rather than
+assumed: a full-bleed probe icon rendered exactly 16 x 16 inside a 32 x 48
+tray button on 2026-10-08.
+
+Supplying larger art buys nothing. The shell downscales it, and hard-edged
+bars come back blurred. Neighbouring icons look sharper because they are
+smooth logo artwork that survives a downscale, not because they are given more
+pixels. The icon is therefore drawn at `SM_CXSMICON` and kept crisp, and the
+tip of each bar is antialiased by hand so a percentage still reads between
+whole pixels.
+
+Horizontal strips replaced vertical columns for the same reason. Five columns
+in 16 pixels leaves 2 pixels of width each; five strips give every value the
+full 16 pixels of length to express itself in. The bar occupies its whole
+pitch, while the track stops one row short, which keeps five idle strips from
+merging into a single grey slab.
+
+#### Cost
+
+The icon is rebuilt only when the bar lengths change in whole pixels. A CPU
+jittering between 0% and 2% maps to the same zero-length bar, so a quiet
+machine pays nothing.
+
+Cost therefore scales with how much the reading actually moves, which is the
+point. Measured on 2026-10-08 and 2026-10-09, hidden window, 2 s poll, on a
+24-core machine sitting at about 37% load:
+
+| | CPU of one core |
+|---|---|
+| Rebuild every tick | 0.208% |
+| Rebuild only on change, values moving | 0.31% to 0.44% |
+| Rebuild only on change, values settled | 0.052% |
+
+Two consecutive 30 s windows gave 0.31% and 0.052%, so quote the range, not a
+single number. The worst case is still under half a percent of one core, which
+is 0.02% of this machine.
+
+Icon rebuild plus `NIM_MODIFY` costs about 4 ms, against 0.43 ms for the
+sample itself, which is why the skip is worth its state.
+
+No handle leak: GDI 21, USER 16 and about 269 process handles, all flat across
+24 rebuilds over 48 seconds. The previous icon is destroyed only after the
+shell has been handed the new one.
+
+**Verification (manual):**
+
+1. Look at the tray icon. It shows one strip per selected measurement, and
+   five distinct rows are countable even when every value is low.
+2. Run a CPU load. The top strip lengthens and turns amber, then red.
+3. Hover the icon. The text lists each measurement and its percentage, in the
+   same order as the strips.
+4. Hide GPU in the right click menu. The icon loses a strip, the rest grow
+   thicker, and the hover text loses its GPU line.
+5. Hide every measurement. The icon becomes the four-bar mark.
+6. Leave the machine idle for a minute. In Task Manager, `glint` CPU reads
+   0.0%.
+
+---
+
+### GLINT-KPI-TOGGLE: The right click menu chooses which measurements show
+
+**Applies to:** glint
+**Verification:** manual
+
+The right click menu shall carry a checkable item per measurement — CPU,
+Memory, GPU, NPU, Disk activity, Disk space — and the choice shall survive a
+restart. There is no gear button: the menu opens from the tray icon and from
+the window itself, so a second control would buy nothing.
+
+GPU and NPU appear only when the hardware does. A machine with no NPU never
+offers an item that would do nothing (GLINT-NPU-OPTIONAL).
+
+Hiding every measurement is allowed. The window then draws `Right click to
+choose measurements` and sizes itself to that one line, which is recoverable
+without touching the config file. Blocking the last toggle would need a greyed
+item that explains itself, and an empty panel that says what to do is simpler.
+
+The menu also carries **Hide**, which does what the minimize button does.
+
+**Verification (manual):**
+
+1. Right click the tray icon. Every measurement carries a check mark.
+2. Click **GPU**. The GPU row disappears and the window gets shorter.
+3. Right click again. **GPU** has no check mark.
+4. Exit and restart. The GPU row is still absent.
+5. Turn every measurement off. The window reads `Right click to choose
+   measurements`, and the header and minimize button remain.
+6. Turn them back on one at a time. Each returns in its original order.
+7. On a machine with no NPU, the menu has no **NPU** item at all.
+
+---
+
+### GLINT-FIT: The window is exactly as large as its content
+
+**Applies to:** glint
+**Verification:** manual
+
+The window shall be exactly as tall as the measurements it draws, and exactly
+as wide as it needs to be, with no gap at any edge.
+
+Height is the sum of the rows present: CPU and memory each add a row plus a
+detail line; GPU, NPU, disk activity and disk space each add one row.
+
+Width is 300 logical pixels unless the disk space line needs more, in which
+case the window widens to fit it and never narrows below 300. Drive
+percentages are measured as `100%` whatever they currently read, so a drive
+filling up cannot make the window resize.
+
+Measured on 2026-10-08 at 96 DPI with four fixed drives:
+
+| Shown | Size |
+|-------|------|
+| Everything | 338 x 238 |
+| No disk space | 300 x 212 |
+| No disk space, no disk activity | 300 x 186 |
+| CPU and memory only | 300 x 134 |
+| CPU only | 300 x 93 |
+| Nothing | 300 x 78 |
+
+The width drops from 338 to 300 as soon as disk space is hidden, because the
+drive line was the only thing asking for the extra 38.
+
+**Verification (manual):**
+
+1. Open the window with every measurement on. No gap below the last row.
+2. Hide measurements one at a time. The window shrinks by one row each time,
+   and never leaves a blank band.
+3. Hide disk space on a machine with several drives. The window narrows.
+4. Watch a drive cross a percentage boundary, such as 9% to 10%. The window
+   width does not change.
+
+---
+
+### GLINT-DISK-LINE: Disk space is one line of percentages
+
+**Applies to:** glint
+**Verification:** manual
+
+Disk space shall be a single line — `Disk space   C: 95%   Z: 41%` — with no
+separator rule above it, no progress bars, and the same font size as the rest
+of the body.
+
+The drive letter takes the disk hue and the percentage takes its
+GLINT-ALERT-COLOR colour. The percentage sits in a fixed-width box so the
+columns stay still as the numbers move.
+
+This replaces the earlier section, which had a separator rule, a "Disk space"
+title row, and one row per drive carrying a letter, a percentage and a bar at
+11px. Four drives cost five rows and 110 pixels; they now cost one row and 26.
+
+**Verification (manual):**
+
+1. Open the window. Disk space is one line, and the drive text is the same
+   size as the `CPU` and `MEM` labels.
+2. There is no rule above it and no bar beside any drive.
+3. A drive above 95% full draws its percentage in red, and its letter keeps
+   the disk hue.
 
 ---
 
@@ -116,7 +337,8 @@ memory, and it is the number to watch.
 **Applies to:** glint
 **Verification:** manual
 
-The NPU row shall be absent when the machine exposes no compute-only adapter.
+The NPU row shall be absent when the machine exposes no compute-only adapter,
+and also when the user hides it in the right click menu (GLINT-KPI-TOGGLE).
 The window shall be shorter by exactly one row, with no gap and no `--`.
 
 The NPU is found through `D3DKMTEnumAdapters3` with the `IncludeComputeOnly`
@@ -180,14 +402,17 @@ own hue, so the row stays identifiable.
 
 **Verification (manual):**
 
-1. Open the window and read the disk space section. A drive above 80% full
-   shows an amber bar and amber text.
+1. Open the window and read the disk space line. A drive above 80% full
+   shows an amber percentage; there is no bar (GLINT-DISK-LINE).
 2. Run a CPU load, such as a build. The CPU row turns amber above 80% and red
    above 95%.
 
 Observed on 2026-10-05: an NPU at 94% drew the percent text and the sparkline
 in amber, and the NPU label kept its own hue. A drive at 92% full drew its bar
 and its percent in amber in the same window.
+
+Re-checked on 2026-10-08 after GLINT-DISK-LINE removed the bars: four drives
+at 97% drew their percentages in red, and each drive letter kept the disk hue.
 
 A wrong threshold colour is visible on screen in one second, so this stays
 `manual`.
@@ -366,8 +591,8 @@ lies on a connected monitor, and the default corner otherwise. That covers a
 monitor that was unplugged after the drag. The window is measured at the
 target monitor's scale before it moves.
 
-When the content changes height (a drive appears or goes away), the window
-shall stay where it is. In the default corner it
+When the content changes size (a drive appears or goes away, or a measurement
+is toggled in the menu), the window shall stay where it is. In the default corner it
 re-anchors to the corner and grows upward. Anywhere else it keeps its top left
 and moves up only as far as it must to keep its bottom above the taskbar.
 
@@ -494,14 +719,23 @@ and a stale query returns frozen values with no error.
 **Applies to:** glint
 **Verification:** test
 
-`%APPDATA%\glint\config.json` shall hold the window position. The reader
-shall fall back to the defaults for any key that is missing, unknown or
-damaged, and shall never fail. The retired `pinned` and `diskExpanded` keys
-from older files are ignored.
+`%APPDATA%\glint\config.json` shall hold the window position and the six
+visibility booleans (GLINT-KPI-TOGGLE). The reader shall fall back to the
+defaults for any key that is missing, unknown or damaged, and shall never
+fail. The retired `pinned` and `diskExpanded` keys from older files are
+ignored.
 
 A position needs both `x` and `y`. A half-written pair shall be dropped, not
 half applied, because a window placed at one stored coordinate and one default
 coordinate lands somewhere the user never put it.
+
+Every measurement defaults to visible, so a file written before the toggles
+existed — one holding only `x` and `y` — opens showing everything, exactly as
+it did before.
+
+A damaged boolean falls back to visible rather than hidden. A row that fails
+to parse and then vanishes looks like a bug in the sampler, and the user has
+no way to tell the difference; a row that stays is self-correcting.
 
 **Acceptance criteria:**
 
@@ -512,6 +746,15 @@ coordinate lands somewhere the user never put it.
 - `"not json at all"`, `""` and `{"x":` each give the defaults
 - `{"x": 10}` and `{"y": 10}` each give `position = None`
 - An unknown key is ignored, and the known keys still read correctly
+- `{}` gives every one of the six visibility flags as `true`
+- `{"gpu": false}` hides the GPU row and leaves the other five visible
+- All six of `cpu`, `memory`, `gpu`, `npu`, `diskActivity`, `diskSpace` set to
+  `false` gives every flag `false`
+- `{"gpu": }`, `{"gpu": yes}` and `{"gpu":` each leave the GPU row visible
+- `{"diskActivity": false, "diskSpace": true}` sets exactly those two, so the
+  two similar keys do not cross-match
+- `{"x": -1200, "y": 48, "npu": false}` keeps both the position and the
+  hidden row
 
 Tests: `specs/glint/tests/config_parse.rs`
 
@@ -576,6 +819,36 @@ breaking applications."
 
 `src/adapters.rs` keeps the DXCore path, because the spike prints both lists
 side by side. `src/wddm.rs` is what the app uses.
+
+### Why not the Widgets Board
+
+glint shows its live reading in the tray icon (GLINT-TRAY-BARS) rather than as
+a Windows 11 widget. The Widgets Board was investigated on 2026-10-08 and
+cannot do the job.
+
+The ask was a reading rendered on the taskbar, the way the weather entry point
+shows `75°F Clear`. That entry point **is** the Widgets button itself, fed by
+Microsoft's own service. A third-party provider cannot write to it. The
+provider manifest schema settles it: a widget declares
+`<Size Name="small|medium|large"/>`, an icon and picker screenshots, and
+nothing else. There is no taskbar surface in the schema. A third-party widget
+renders only as a card inside the board, which the user must open with Win+W.
+
+The cost of getting that card would have been high: widget providers must be
+MSIX-packaged and signed, must register an out-of-process COM server, and must
+link the Windows App SDK. That ends the single loose 190 KB executable.
+
+The tray icon has none of those costs. glint already drew its own icon at
+runtime, so the live version is the same DIB with different pixel heights.
+
+A spike did establish that the Rust side would have worked, and that finding is
+kept in case the board is ever wanted as a second surface:
+`windows-bindgen 0.66` generates usable bindings for
+`Microsoft.Windows.Widgets.Providers` from the winmd in the installed
+`WindowsAppRuntime.1.8` package, `#[implement(IWidgetProvider)]` compiles, and
+`QueryInterface` for `IWidgetManagerStatics` against the shipped DLL succeeds,
+so the generated IIDs and vtable layout are correct. Only package identity was
+missing. See `specs/glint/archive/v2-settings-and-widget.md`.
 
 ### Why GDI, and not Direct2D
 

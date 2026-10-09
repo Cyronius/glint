@@ -6,5 +6,6 @@ pub mod luid;
 pub mod pdh;
 pub mod render;
 pub mod sampler;
+pub mod trayicon;
 pub mod wddm;
 pub mod window;

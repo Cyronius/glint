@@ -11,10 +11,8 @@ use windows::Win32::Graphics::Dwm::{
     DWMWCP_ROUND,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateBitmap, CreateDIBSection, EndPaint, GetDC, InvalidateRect, MonitorFromPoint,
-    MonitorFromRect, MonitorFromWindow, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, HBITMAP, HBRUSH, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    MONITOR_DEFAULTTONULL, PAINTSTRUCT,
+    BeginPaint, EndPaint, InvalidateRect, MonitorFromPoint, MonitorFromRect, MonitorFromWindow,
+    HBRUSH, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, PAINTSTRUCT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -22,18 +20,20 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
+    Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP,
+    NIM_ADD,
     NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER,
     NOTIFYICON_VERSION_4,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyMenu, DestroyWindow, DispatchMessageW, GetMessageW, GetSystemMetrics,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyMenu, DestroyWindow, DispatchMessageW, GetMessageW,
     GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
     RegisterClassExW, RegisterWindowMessageW, SendMessageW, WINDOW_STYLE, WS_EX_TOPMOST, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, GWLP_USERDATA, HICON, HTCAPTION,
-    HWND_TOPMOST, ICONINFO, IDC_ARROW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG,
-    PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, SM_CXSMICON, SWP_NOACTIVATE,
+    SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, DestroyIcon, GWLP_USERDATA,
+    HICON, HTCAPTION,
+    HWND_TOPMOST, IDC_ARROW, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG,
+    PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, SWP_NOACTIVATE,
     SW_HIDE, SW_SHOWNOACTIVATE, TPM_RIGHTBUTTON,
     WM_COMMAND, WM_NOTIFY, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NCLBUTTONDOWN, WM_PAINT,
@@ -47,7 +47,7 @@ use windows::Win32::UI::Controls::{
 };
 
 use crate::config::Config;
-use crate::render::{contains, Layout, Renderer};
+use crate::render::{contains, Layout, Renderer, Shown};
 use crate::sampler::{Histories, Metrics, Sampler};
 
 /// The message the tray sends for icon events.
@@ -59,9 +59,10 @@ const TIMER_POLL: usize = 1;
 const TIMER_TRAY_RETRY: usize = 2;
 const TRAY_RETRY_MS: u32 = 2000;
 
-/// GLINT-IDLE-COST: a hidden window polls once per 10 s and never renders.
+/// GLINT-IDLE-COST: a hidden window never renders, but still samples for
+/// the tray icon (GLINT-TRAY-BARS).
 const POLL_VISIBLE_MS: u32 = 1000;
-const POLL_HIDDEN_MS: u32 = 10_000;
+const POLL_HIDDEN_MS: u32 = 2_000;
 
 /// The gap between the window and the edges of the work area.
 const EDGE_GAP: i32 = 8;
@@ -69,6 +70,13 @@ const EDGE_GAP: i32 = 8;
 const MENU_STARTUP: usize = 102;
 const MENU_RESET_POSITION: usize = 103;
 const MENU_EXIT: usize = 104;
+const MENU_CPU: usize = 110;
+const MENU_MEMORY: usize = 111;
+const MENU_GPU: usize = 112;
+const MENU_NPU: usize = 113;
+const MENU_DISK_ACTIVITY: usize = 114;
+const MENU_DISK_SPACE: usize = 115;
+const MENU_HIDE: usize = 116;
 
 pub struct App {
     window: HWND,
@@ -92,6 +100,9 @@ pub struct App {
     dpi: u32,
     /// The hover text control for the two header buttons.
     tooltip: HWND,
+    /// The bar heights last drawn into the tray icon, so an unchanged reading
+    /// costs no icon rebuild and no shell call.
+    tray_signature: Vec<i32>,
 }
 
 /// `TTTOOLINFOW` without `lpReserved`: the size every comctl32 version accepts.
@@ -147,18 +158,23 @@ impl App {
         let dpi = unsafe { GetDpiForWindow(window) }.max(96);
         let mut app = Box::new(Self {
             window,
-            layout: Layout::new(dpi, sampler.has_npu(), 0),
+            layout: Layout::new(
+                dpi,
+                Shown::resolve(&config.show, sampler.has_gpu(), sampler.has_npu(), false),
+                0,
+            ),
             sampler,
             metrics: Metrics::default(),
             history: Histories::default(),
             renderer: Renderer::new(),
             config,
-            icon: make_tray_icon(),
+            icon: crate::trayicon::logo_icon(),
             visible: false,
             dragging: false,
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
             dpi,
             tooltip: HWND::default(),
+            tray_signature: Vec::new(),
         });
 
         // The window procedure reads the app back out of the window.
@@ -209,7 +225,10 @@ impl App {
     /// Add the icon. The shell refuses the add while it is still starting, so
     /// a failure schedules one retry rather than leaving the app unreachable.
     fn add_tray_icon(&mut self) {
-        let mut data = self.tray_data(NIF_MESSAGE | NIF_ICON | NIF_TIP);
+        // NIF_SHOWTIP matters: NOTIFYICON_VERSION_4 suppresses the standard
+        // tooltip unless it is asked for, and the app draws no pop-up of its
+        // own. Without it the hover text never appears.
+        let mut data = self.tray_data(NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP);
         write_tip(&mut data.szTip, "Glint");
         let added = unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool();
         if !added {
@@ -237,22 +256,54 @@ impl App {
         }
     }
 
-    /// Keep the tooltip current, so the numbers are readable while hidden.
-    fn update_tooltip(&mut self) {
-        let mut text = format!(
-            "CPU {:.0}%  MEM {:.0}%",
-            self.metrics.cpu, self.metrics.memory
+    /// Redraw the tray icon from the latest reading and refresh its tooltip.
+    ///
+    /// The icon is the only surface that is always on screen, so it carries a
+    /// micro-bar per measurement (GLINT-TRAY-BARS). The old icon is destroyed
+    /// only after the shell has been handed the new one.
+    fn update_tray(&mut self) {
+        let shown = Shown::resolve(
+            &self.config.show,
+            self.sampler.has_gpu(),
+            self.sampler.has_npu(),
+            !self.metrics.volumes.is_empty(),
         );
-        if let Some(gpu) = self.metrics.gpu {
-            text.push_str(&format!("  GPU {gpu:.0}%"));
+        let signature = crate::trayicon::signature(&self.metrics, shown);
+        if signature == self.tray_signature {
+            return;
         }
-        if let Some(npu) = self.metrics.npu {
-            text.push_str(&format!("  NPU {npu:.0}%"));
+        self.tray_signature = signature;
+
+        // One line per strip, top to bottom in the same order, because the
+        // icon itself has no room to label them.
+        let readings = crate::trayicon::readings(&self.metrics, shown);
+        let mut text = String::with_capacity(64);
+        for (label, percent) in &readings {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&format!("{label:<4} {percent:>3.0}%"));
         }
-        let mut data = self.tray_data(NIF_TIP);
+        if text.is_empty() {
+            text.push_str("Glint - right click to choose measurements");
+        }
+
+        let fresh = crate::trayicon::metric_icon(&self.metrics, shown);
+        let previous = self.icon;
+        if !fresh.is_invalid() {
+            self.icon = fresh;
+        }
+
+        let mut data = self.tray_data(NIF_TIP | NIF_ICON | NIF_SHOWTIP);
         write_tip(&mut data.szTip, &text);
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+        }
+
+        if !fresh.is_invalid() && !previous.is_invalid() {
+            unsafe {
+                let _ = DestroyIcon(previous);
+            }
         }
     }
 
@@ -292,13 +343,26 @@ impl App {
         }
     }
 
+    /// The layout the current settings and metrics ask for (GLINT-FIT).
+    fn wanted_layout(&mut self) -> Layout {
+        let shown = Shown::resolve(
+            &self.config.show,
+            self.sampler.has_gpu(),
+            self.sampler.has_npu(),
+            !self.metrics.volumes.is_empty(),
+        );
+        let disk_width = if shown.disk_space {
+            self.renderer
+                .disk_line_width(self.dpi, &self.metrics.volumes)
+        } else {
+            0
+        };
+        Layout::new(self.dpi, shown, disk_width)
+    }
+
     /// Re-measure at the current DPI. Nothing moves until `apply_bounds`.
     fn relayout(&mut self) {
-        self.layout = Layout::new(
-            self.dpi,
-            self.sampler.has_npu(),
-            self.metrics.volumes.len(),
-        );
+        self.layout = self.wanted_layout();
     }
 
     /// Move the window to `(x, y)` at the current layout size, on top.
@@ -483,18 +547,14 @@ impl App {
     fn poll(&mut self) {
         self.metrics = self.sampler.tick();
         self.history.push(&self.metrics);
-        self.update_tooltip();
+        self.update_tray();
 
         if !self.visible {
             // GLINT-IDLE-COST: no layout work and no rendering while hidden.
             return;
         }
-        // A new disk count changes the height, so re-measure before painting.
-        let wanted = Layout::new(
-            self.dpi,
-            self.sampler.has_npu(),
-            self.metrics.volumes.len(),
-        );
+        // A new disk count changes the size, so re-measure before painting.
+        let wanted = self.wanted_layout();
         if (wanted.width, wanted.height) != (self.layout.width, self.layout.height) {
             self.refit();
         }
@@ -537,7 +597,41 @@ impl App {
             } else {
                 Default::default()
             };
+        // GLINT-KPI-TOGGLE: a check mark per measurement. GPU and NPU appear
+        // only when the hardware does, so no item is offered that does nothing.
+        let ticked = |on: bool| {
+            MF_STRING
+                | if on {
+                    MF_CHECKED
+                } else {
+                    Default::default()
+                }
+        };
+        let show = self.config.show;
         unsafe {
+            let _ = AppendMenuW(menu, ticked(show.cpu), MENU_CPU, w!("CPU"));
+            let _ = AppendMenuW(menu, ticked(show.memory), MENU_MEMORY, w!("Memory"));
+            if self.sampler.has_gpu() {
+                let _ = AppendMenuW(menu, ticked(show.gpu), MENU_GPU, w!("GPU"));
+            }
+            if self.sampler.has_npu() {
+                let _ = AppendMenuW(menu, ticked(show.npu), MENU_NPU, w!("NPU"));
+            }
+            let _ = AppendMenuW(
+                menu,
+                ticked(show.disk_activity),
+                MENU_DISK_ACTIVITY,
+                w!("Disk activity"),
+            );
+            let _ = AppendMenuW(
+                menu,
+                ticked(show.disk_space),
+                MENU_DISK_SPACE,
+                w!("Disk space"),
+            );
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, MF_STRING, MENU_HIDE, w!("Hide"));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, startup_flags, MENU_STARTUP, w!("Start with Windows"));
             let _ = AppendMenuW(menu, MF_STRING, MENU_RESET_POSITION, w!("Reset position"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -559,7 +653,30 @@ impl App {
     }
 
     fn on_command(&mut self, id: usize) {
+        let show = &mut self.config.show;
+        let toggled = match id {
+            MENU_CPU => Some(&mut show.cpu),
+            MENU_MEMORY => Some(&mut show.memory),
+            MENU_GPU => Some(&mut show.gpu),
+            MENU_NPU => Some(&mut show.npu),
+            MENU_DISK_ACTIVITY => Some(&mut show.disk_activity),
+            MENU_DISK_SPACE => Some(&mut show.disk_space),
+            _ => None,
+        };
+        if let Some(flag) = toggled {
+            *flag = !*flag;
+            self.config.save();
+            self.tray_signature.clear();
+            self.update_tray();
+            // Hidden, the next `show()` measures from scratch anyway.
+            if self.visible {
+                self.refit();
+            }
+            return;
+        }
+
         match id {
+            MENU_HIDE => self.hide(),
             MENU_STARTUP => set_startup_enabled(!startup_enabled()),
             MENU_RESET_POSITION => {
                 self.config.position = None;
@@ -615,6 +732,11 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         self.remove_tray_icon();
+        if !self.icon.is_invalid() {
+            unsafe {
+                let _ = DestroyIcon(self.icon);
+            }
+        }
     }
 }
 
@@ -658,7 +780,7 @@ unsafe extern "system" fn window_proc(
     if message == app.taskbar_created {
         // Explorer restarted and dropped every icon. Add ours again.
         app.add_tray_icon();
-        app.update_tooltip();
+        app.update_tray();
         return LRESULT(0);
     }
 
@@ -825,96 +947,6 @@ fn write_tip(buffer: &mut [u16; 128], text: &str) {
     {
         *slot = unit;
     }
-}
-
-// --------------------------------------------------------- the tray icon ----
-
-/// Draw the tray icon at runtime, so the build needs no resource file.
-///
-/// Four bars of rising height. The pixels go straight into a 32-bit DIB, so
-/// the alpha channel is exact and no font or shape call is involved.
-fn make_tray_icon() -> HICON {
-    let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64);
-
-    let mut header = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: size,
-            // Negative height makes the rows top down, which is easier to
-            // reason about than the default bottom-up order.
-            biHeight: -size,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let mut pixels: *mut core::ffi::c_void = std::ptr::null_mut();
-    let screen = unsafe { GetDC(None) };
-    let color = unsafe {
-        CreateDIBSection(
-            Some(screen),
-            &raw const header,
-            DIB_RGB_COLORS,
-            &raw mut pixels,
-            None,
-            0,
-        )
-    };
-    unsafe { ReleaseDC(None, screen) };
-    let _ = &mut header;
-
-    let Ok(color) = color else {
-        return HICON::default();
-    };
-    if pixels.is_null() {
-        return HICON::default();
-    }
-
-    // The accent blue reads on a light taskbar and on a dark one.
-    const BAR: (u8, u8, u8) = (0x4C, 0x9A, 0xFF);
-    let count = 4i32;
-    let gap = (size / 12).max(1);
-    let bar_width = ((size - gap * (count - 1)) / count).max(1);
-    let left_over = size - (bar_width * count + gap * (count - 1));
-    let start = left_over / 2;
-
-    let row = size as usize;
-    let buffer = unsafe { std::slice::from_raw_parts_mut(pixels.cast::<u32>(), row * row) };
-    buffer.fill(0);
-
-    for index in 0..count {
-        let height = (size * (index + 2)) / (count + 1);
-        let x0 = start + index * (bar_width + gap);
-        for y in (size - height)..size {
-            for x in x0..(x0 + bar_width).min(size) {
-                // Premultiplied BGRA, with alpha at full.
-                buffer[y as usize * row + x as usize] = 0xFF00_0000
-                    | ((BAR.0 as u32) << 16)
-                    | ((BAR.1 as u32) << 8)
-                    | (BAR.2 as u32);
-            }
-        }
-    }
-
-    // A 1-bit mask of zeros means "use the alpha channel".
-    let mask: HBITMAP = unsafe { CreateBitmap(size, size, 1, 1, None) };
-    let info = ICONINFO {
-        fIcon: true.into(),
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: mask,
-        hbmColor: color,
-    };
-    let icon = unsafe { CreateIconIndirect(&info) };
-    unsafe {
-        use windows::Win32::Graphics::Gdi::DeleteObject;
-        let _ = DeleteObject(color.into());
-        let _ = DeleteObject(mask.into());
-    }
-    icon.unwrap_or_default()
 }
 
 // --------------------------------------------- start with Windows ----------

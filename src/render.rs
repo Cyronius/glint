@@ -9,10 +9,11 @@
 //! allocates nothing.
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, POINT, RECT};
+use windows::Win32::Foundation::{COLORREF, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush,
-    DeleteDC, DeleteObject, DrawTextW, FillRect, GetDC, Polygon, Polyline, ReleaseDC, RoundRect,
+    DeleteDC, DeleteObject, DrawTextW, FillRect, GetDC, GetTextExtentPoint32W, Polygon,
+    Polyline, ReleaseDC, RoundRect,
     SelectObject, SetBkMode, SetTextColor, CLEARTYPE_QUALITY, DEFAULT_CHARSET, DT_LEFT,
     DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBITMAP,
     HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, PS_SOLID, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
@@ -29,15 +30,14 @@ const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
 }
 
 const BACKGROUND: COLORREF = rgb(0x1C, 0x1C, 0x1E);
-const TEXT: COLORREF = rgb(0xF2, 0xF2, 0xF7);
 const TEXT_DIM: COLORREF = rgb(0x8E, 0x8E, 0x93);
 const SEPARATOR: COLORREF = rgb(0x38, 0x38, 0x3A);
 
-const CPU_HUE: COLORREF = rgb(0x4C, 0x9A, 0xFF);
-const MEMORY_HUE: COLORREF = rgb(0xA7, 0x8B, 0xFA);
-const GPU_HUE: COLORREF = rgb(0x34, 0xD3, 0x99);
-const NPU_HUE: COLORREF = rgb(0x22, 0xD3, 0xEE);
-const DISK_HUE: COLORREF = rgb(0x94, 0xA3, 0xB8);
+pub const CPU_HUE: COLORREF = rgb(0x4C, 0x9A, 0xFF);
+pub const MEMORY_HUE: COLORREF = rgb(0xA7, 0x8B, 0xFA);
+pub const GPU_HUE: COLORREF = rgb(0x34, 0xD3, 0x99);
+pub const NPU_HUE: COLORREF = rgb(0x22, 0xD3, 0xEE);
+pub const DISK_HUE: COLORREF = rgb(0x94, 0xA3, 0xB8);
 
 /// GLINT-ALERT-COLOR thresholds.
 const AMBER: COLORREF = rgb(0xF5, 0x9E, 0x0B);
@@ -54,6 +54,13 @@ pub fn alert_color(percent: f32, hue: COLORREF) -> COLORREF {
     } else {
         hue
     }
+}
+
+/// The red, green and blue of a `COLORREF`, for code that builds pixels by
+/// hand rather than asking GDI to draw.
+pub fn rgb_parts(color: COLORREF) -> (u8, u8, u8) {
+    let (r, g, b) = channels(color);
+    (r as u8, g as u8, b as u8)
 }
 
 fn channels(color: COLORREF) -> (u32, u32, u32) {
@@ -85,14 +92,52 @@ mod design {
     pub const DETAIL: i32 = 15;
     pub const SPARK_WIDTH: i32 = 104;
     pub const SPARK_HEIGHT: i32 = 18;
-    pub const SEPARATOR: i32 = 9;
-    pub const VOLUME: i32 = 21;
     pub const BUTTON: i32 = 20;
     pub const LABEL_WIDTH: i32 = 40;
     pub const VALUE_WIDTH: i32 = 46;
+    /// After the "Disk space" label, before the first drive.
+    pub const LABEL_GAP: i32 = 12;
+    /// Between one drive's percentage and the next drive's letter.
+    pub const TOKEN_GAP: i32 = 12;
+    /// Between a drive letter and its percentage.
+    pub const PAIR_GAP: i32 = 5;
 }
 
-/// Which rows the window shows, and how tall that makes it.
+/// Which measurements the window draws, after the user's choice has been
+/// resolved against the hardware that exists (GLINT-KPI-TOGGLE).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shown {
+    pub cpu: bool,
+    pub memory: bool,
+    pub gpu: bool,
+    pub npu: bool,
+    pub disk_activity: bool,
+    pub disk_space: bool,
+}
+
+impl Shown {
+    pub fn resolve(
+        show: &crate::config::Show,
+        has_gpu: bool,
+        has_npu: bool,
+        has_volumes: bool,
+    ) -> Self {
+        Self {
+            cpu: show.cpu,
+            memory: show.memory,
+            gpu: show.gpu && has_gpu,
+            npu: show.npu && has_npu,
+            disk_activity: show.disk_activity,
+            disk_space: show.disk_space && has_volumes,
+        }
+    }
+
+    pub fn any(&self) -> bool {
+        self.cpu || self.memory || self.gpu || self.npu || self.disk_activity || self.disk_space
+    }
+}
+
+/// Which rows the window shows, and how large that makes it (GLINT-FIT).
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     pub dpi: u32,
@@ -102,9 +147,7 @@ pub struct Layout {
     pub minimize_rect: RECT,
     /// The bottom of the header strip. A drag starts above this line.
     pub header_bottom: i32,
-    /// The "Disk space" title above the drive list.
-    disk_title_rect: RECT,
-    volumes: usize,
+    pub shown: Shown,
 }
 
 fn scale(value: i32, dpi: u32) -> i32 {
@@ -112,21 +155,35 @@ fn scale(value: i32, dpi: u32) -> i32 {
 }
 
 impl Layout {
-    pub fn new(dpi: u32, has_npu: bool, volumes: usize) -> Self {
+    /// `disk_line_width` is the measured width of the drive line, which is the
+    /// one piece of content that can need more than the natural width.
+    pub fn new(dpi: u32, shown: Shown, disk_line_width: i32) -> Self {
         let pad = scale(design::PAD, dpi);
-        let width = scale(design::WIDTH, dpi);
+        let row = scale(design::ROW, dpi);
+        let detail = scale(design::DETAIL, dpi);
 
-        // CPU and memory each carry a detail line. The plain rows are GPU,
-        // the NPU when there is one, and disk activity.
-        let detail_rows = 2;
-        let plain_rows = 1 + usize::from(has_npu) + 1;
+        let mut width = scale(design::WIDTH, dpi);
         let mut height = pad + scale(design::HEADER, dpi);
-        height += detail_rows * (scale(design::ROW, dpi) + scale(design::DETAIL, dpi));
-        height += plain_rows as i32 * scale(design::ROW, dpi);
-        height += scale(design::SEPARATOR, dpi);
-        let title_top = height;
-        height += scale(design::ROW, dpi);
-        height += volumes as i32 * scale(design::VOLUME, dpi);
+        // CPU and memory each carry a detail line; the rest are plain rows.
+        if shown.cpu {
+            height += row + detail;
+        }
+        if shown.memory {
+            height += row + detail;
+        }
+        for present in [shown.gpu, shown.npu, shown.disk_activity] {
+            if present {
+                height += row;
+            }
+        }
+        if shown.disk_space {
+            height += row;
+            width = width.max(disk_line_width + pad * 2);
+        }
+        // With nothing selected the window still says how to get a row back.
+        if !shown.any() {
+            height += row;
+        }
         height += pad;
 
         // The minimize button sits at the far right as Windows places it.
@@ -144,13 +201,7 @@ impl Layout {
                 bottom: header_top + button,
             },
             header_bottom: header_top + button,
-            disk_title_rect: RECT {
-                left: pad,
-                top: title_top,
-                right: width - pad,
-                bottom: title_top + scale(design::ROW, dpi),
-            },
-            volumes,
+            shown,
         }
     }
 
@@ -180,6 +231,9 @@ pub struct Renderer {
     previous_bitmap: HGDIOBJ,
     size: (i32, i32),
     dpi: u32,
+    /// Tracked apart from `dpi`: the fonts are built before the back buffer,
+    /// so the window can measure the disk line before it knows its own width.
+    font_dpi: u32,
     font_label: HFONT,
     font_value: HFONT,
     font_detail: HFONT,
@@ -197,6 +251,7 @@ impl Renderer {
             previous_bitmap: HGDIOBJ::default(),
             size: (0, 0),
             dpi: 0,
+            font_dpi: 0,
             font_label: HFONT::default(),
             font_value: HFONT::default(),
             font_detail: HFONT::default(),
@@ -205,8 +260,45 @@ impl Renderer {
         }
     }
 
+    /// Build the three fonts for `dpi`, independently of the back buffer.
+    fn ensure_fonts(&mut self, dpi: u32) {
+        if self.font_dpi == dpi && !self.font_label.is_invalid() {
+            return;
+        }
+        self.release_fonts();
+        self.font_label = font(scale(12, dpi), FW_SEMIBOLD.0 as i32);
+        self.font_value = font(scale(15, dpi), FW_SEMIBOLD.0 as i32);
+        self.font_detail = font(scale(11, dpi), FW_NORMAL.0 as i32);
+        self.font_dpi = dpi;
+    }
+
+    /// The width the drive line wants, so the window can widen to fit it
+    /// (GLINT-DISK-LINE). Percentages are measured as `100%` whatever they
+    /// read, so the window does not resize as a drive fills.
+    pub fn disk_line_width(&mut self, dpi: u32, volumes: &[crate::sampler::Volume]) -> i32 {
+        if volumes.is_empty() {
+            return 0;
+        }
+        self.ensure_fonts(dpi);
+        let screen = unsafe { GetDC(None) };
+        let font = self.font_label;
+        let mut total = text_width(screen, font, "Disk space", &mut self.scratch);
+        total += scale(design::LABEL_GAP, dpi);
+        let percent = text_width(screen, font, "100%", &mut self.scratch);
+        for (index, volume) in volumes.iter().enumerate() {
+            if index > 0 {
+                total += scale(design::TOKEN_GAP, dpi);
+            }
+            total += text_width(screen, font, &volume.label, &mut self.scratch);
+            total += scale(design::PAIR_GAP, dpi) + percent;
+        }
+        unsafe { ReleaseDC(None, screen) };
+        total
+    }
+
     /// Make sure the buffer and the fonts match the current size and DPI.
     fn prepare(&mut self, layout: &Layout) {
+        self.ensure_fonts(layout.dpi);
         if self.size == (layout.width, layout.height) && self.dpi == layout.dpi {
             return;
         }
@@ -217,14 +309,7 @@ impl Renderer {
         unsafe { ReleaseDC(None, screen) };
         self.previous_bitmap = unsafe { SelectObject(self.memory_dc, self.bitmap.into()) };
         self.size = (layout.width, layout.height);
-
-        if self.dpi != layout.dpi {
-            self.release_fonts();
-            self.font_label = font(scale(12, layout.dpi), FW_SEMIBOLD.0 as i32);
-            self.font_value = font(scale(15, layout.dpi), FW_SEMIBOLD.0 as i32);
-            self.font_detail = font(scale(11, layout.dpi), FW_NORMAL.0 as i32);
-            self.dpi = layout.dpi;
-        }
+        self.dpi = layout.dpi;
     }
 
     fn release_buffer(&mut self) {
@@ -256,6 +341,7 @@ impl Renderer {
         self.font_label = HFONT::default();
         self.font_value = HFONT::default();
         self.font_detail = HFONT::default();
+        self.font_dpi = 0;
     }
 
     /// Draw the whole panel into the buffer, then copy it to the window in one
@@ -284,41 +370,48 @@ impl Renderer {
 
         self.draw_header(layout);
         let mut y = layout.scale(design::PAD) + layout.scale(design::HEADER);
+        let shown = layout.shown;
 
-        let rows = [
-            Row {
-                label: "CPU",
-                percent: metrics.cpu,
-                hue: CPU_HUE,
-                history: &history.cpu,
-                // GLINT-CPU-BOOST: the clock and the ratio to the base clock.
-                detail: Some(format!(
-                    "{:.2} GHz  ({:.2}x base)",
-                    metrics.cpu_ghz, metrics.cpu_ratio
-                )),
-            },
-            Row {
-                label: "MEM",
-                percent: metrics.memory,
-                hue: MEMORY_HUE,
-                history: &history.memory,
-                detail: Some(format!(
-                    "{:.1} / {:.1} GiB",
-                    gib(metrics.memory_used_bytes),
-                    gib(metrics.memory_total_bytes)
-                )),
-            },
-        ];
-        for row in &rows {
-            y = self.draw_row(layout, row, y);
+        if shown.cpu {
+            y = self.draw_row(
+                layout,
+                &Row {
+                    label: "CPU",
+                    percent: metrics.cpu,
+                    hue: CPU_HUE,
+                    history: &history.cpu,
+                    // GLINT-CPU-BOOST: the clock and the ratio to the base clock.
+                    detail: Some(format!(
+                        "{:.2} GHz  ({:.2}x base)",
+                        metrics.cpu_ghz, metrics.cpu_ratio
+                    )),
+                },
+                y,
+            );
         }
-
-        if let Some(gpu) = metrics.gpu {
+        if shown.memory {
+            y = self.draw_row(
+                layout,
+                &Row {
+                    label: "MEM",
+                    percent: metrics.memory,
+                    hue: MEMORY_HUE,
+                    history: &history.memory,
+                    detail: Some(format!(
+                        "{:.1} / {:.1} GiB",
+                        gib(metrics.memory_used_bytes),
+                        gib(metrics.memory_total_bytes)
+                    )),
+                },
+                y,
+            );
+        }
+        if shown.gpu {
             y = self.draw_row(
                 layout,
                 &Row {
                     label: "GPU",
-                    percent: gpu,
+                    percent: metrics.gpu.unwrap_or(0.0),
                     hue: GPU_HUE,
                     history: &history.gpu,
                     detail: None,
@@ -327,12 +420,12 @@ impl Renderer {
             );
         }
         // GLINT-NPU-OPTIONAL: no NPU, no row, and the window is shorter.
-        if let Some(npu) = metrics.npu {
+        if shown.npu {
             y = self.draw_row(
                 layout,
                 &Row {
                     label: "NPU",
-                    percent: npu,
+                    percent: metrics.npu.unwrap_or(0.0),
                     hue: NPU_HUE,
                     history: &history.npu,
                     detail: None,
@@ -340,29 +433,38 @@ impl Renderer {
                 y,
             );
         }
-        y = self.draw_row(
-            layout,
-            &Row {
-                label: "DISK",
-                percent: metrics.disk,
-                hue: DISK_HUE,
-                history: &history.disk,
-                detail: None,
-            },
-            y,
-        );
-
-        // The separator sits in the middle of its band.
-        let band = layout.scale(design::SEPARATOR);
-        let line = RECT {
-            left: layout.scale(design::PAD),
-            top: y + band / 2,
-            right: layout.width - layout.scale(design::PAD),
-            bottom: y + band / 2 + 1,
-        };
-        self.fill(&line, SEPARATOR);
-
-        self.draw_disk_section(layout, metrics);
+        if shown.disk_activity {
+            y = self.draw_row(
+                layout,
+                &Row {
+                    label: "DISK",
+                    percent: metrics.disk,
+                    hue: DISK_HUE,
+                    history: &history.disk,
+                    detail: None,
+                },
+                y,
+            );
+        }
+        if shown.disk_space {
+            self.draw_disk_line(layout, metrics, y);
+        }
+        if !shown.any() {
+            let prompt = RECT {
+                left: layout.scale(design::PAD),
+                top: y,
+                right: layout.width - layout.scale(design::PAD),
+                bottom: y + layout.scale(design::ROW),
+            };
+            let font = self.font_detail;
+            self.text(
+                "Right click to choose measurements",
+                &prompt,
+                TEXT_DIM,
+                font,
+                DT_LEFT,
+            );
+        }
 
         unsafe {
             let _ = BitBlt(
@@ -530,52 +632,56 @@ impl Renderer {
         }
     }
 
-    fn draw_disk_section(&mut self, layout: &Layout, metrics: &Metrics) {
-        let title = layout.disk_title_rect;
-        self.text("Disk space", &title, TEXT_DIM, self.font_label, DT_LEFT);
+    /// Every drive on one line: `Disk space   C: 95%   Z: 41%`
+    /// (GLINT-DISK-LINE). No separator above it, no bars, and the same font
+    /// size as the rest of the body.
+    fn draw_disk_line(&mut self, layout: &Layout, metrics: &Metrics, top: i32) {
+        let height = layout.scale(design::ROW);
+        let font = self.font_label;
+        let dc = self.memory_dc;
+        let mut x = layout.scale(design::PAD);
 
-        let pad = layout.scale(design::PAD);
-        let height = layout.scale(design::VOLUME);
-        for (index, volume) in metrics.volumes.iter().take(layout.volumes).enumerate() {
-            let top = title.bottom + index as i32 * height;
-            let label = RECT {
-                left: pad,
+        let label_width = text_width(dc, font, "Disk space", &mut self.scratch);
+        let label = RECT {
+            left: x,
+            top,
+            right: x + label_width,
+            bottom: top + height,
+        };
+        self.text("Disk space", &label, TEXT_DIM, font, DT_LEFT);
+        x = label.right + layout.scale(design::LABEL_GAP);
+
+        // A fixed percentage box keeps the columns still as the numbers move.
+        let percent_width = text_width(dc, font, "100%", &mut self.scratch);
+        for (index, volume) in metrics.volumes.iter().enumerate() {
+            if index > 0 {
+                x += layout.scale(design::TOKEN_GAP);
+            }
+            let drive_width = text_width(dc, font, &volume.label, &mut self.scratch);
+            let drive = RECT {
+                left: x,
                 top,
-                right: pad + layout.scale(30),
+                right: x + drive_width,
                 bottom: top + height,
             };
-            self.text(&volume.label, &label, TEXT, self.font_detail, DT_LEFT);
+            self.text(&volume.label, &drive, DISK_HUE, font, DT_LEFT);
+            x = drive.right + layout.scale(design::PAIR_GAP);
 
             let percent = volume.percent();
-            let color = alert_color(percent, DISK_HUE);
-            let text = RECT {
-                left: label.right,
+            let box_ = RECT {
+                left: x,
                 top,
-                right: label.right + layout.scale(design::VALUE_WIDTH),
+                right: x + percent_width,
                 bottom: top + height,
             };
             self.text(
                 &format!("{percent:.0}%"),
-                &text,
-                color,
-                self.font_detail,
+                &box_,
+                alert_color(percent, DISK_HUE),
+                font,
                 DT_RIGHT,
             );
-
-            let bar_height = layout.scale(6).max(3);
-            let track = RECT {
-                left: layout.width - pad - layout.scale(design::SPARK_WIDTH),
-                top: top + (height - bar_height) / 2,
-                right: layout.width - pad,
-                bottom: top + (height - bar_height) / 2 + bar_height,
-            };
-            self.fill(&track, SEPARATOR);
-            let span = track.right - track.left;
-            let filled = RECT {
-                right: track.left + (span as f32 * percent / 100.0).round() as i32,
-                ..track
-            };
-            self.fill(&filled, color);
+            x = box_.right;
         }
     }
 
@@ -651,6 +757,19 @@ impl Default for Renderer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The width `text` needs in `font`, for laying the disk line out by hand.
+fn text_width(dc: HDC, font: HFONT, text: &str, scratch: &mut Vec<u16>) -> i32 {
+    scratch.clear();
+    scratch.extend(text.encode_utf16());
+    let mut size = SIZE::default();
+    unsafe {
+        let old = SelectObject(dc, font.into());
+        let _ = GetTextExtentPoint32W(dc, scratch, &mut size);
+        SelectObject(dc, old);
+    }
+    size.cx
 }
 
 fn layout_pen_width(height: i32) -> i32 {
