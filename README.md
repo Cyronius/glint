@@ -8,9 +8,8 @@ top until it is minimized, and a hidden window costs almost nothing.
 
 ![The glint tray icon among other notification area icons](docs/tray.png)
 
-The icon is second from the left, shown at 4x. Five strips, top to bottom:
-CPU, memory, GPU, NPU, disk activity. Each fills to its current percentage and
-turns amber at 80% and red at 95%. Hover for the numbers.
+Five strips, top to bottom: CPU, memory, GPU, NPU, disk activity. 
+Each fills to its current percentage and turns amber at 80% and red at 95%. Hover for the numbers.
 
 ![Glint window](docs/screenshot.png)
 
