@@ -2,6 +2,7 @@
 name = "glint"
 version = "0.2.1"
 edition = "2024"
+license = "MIT"
 
 # The spec doctrine keeps requirement tests beside the spec they trace to.
 [[test]]

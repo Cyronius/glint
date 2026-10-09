@@ -88,3 +88,7 @@ a Windows 11 Widgets Board provider.
 No external crates beyond `windows`. Windows 10 or later. Rust stable, MSVC
 target. The NPU row needs WDDM 2.9 for `D3DKMTEnumAdapters3`; without it the
 row is simply absent.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
