@@ -31,7 +31,7 @@ The window opens in the lower right corner, clear of the taskbar.
 |--------|--------|
 | Watch the tray icon | One bar per measurement, filled to the current reading |
 | Left click the tray icon | Show the window, or hide it when it is open |
-| Right click the tray icon | Choose measurements, Hide, Start with Windows, Reset position, Exit |
+| Right click the tray icon | Choose measurements, Hide, Start with Windows, Reset position, tip link, Exit |
 | Minimize button | Hide the window; hover for a tooltip |
 | Drag the header | Move the window; the position is remembered |
 
@@ -52,6 +52,11 @@ There is no taskbar button and no title bar, so **Exit** in the right click
 menu is how to quit.
 
 Settings live in `%APPDATA%\glint\config.json`.
+
+The menu's last line before **Exit** links to
+[KUAF](https://www.kuaf.com/donate), the maintainer's local NPR member
+station. It is a nudge, not a toll — glint is free and the link is the only
+thing asking for anything.
 
 ## Probe binaries
 

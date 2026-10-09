@@ -77,6 +77,10 @@ const MENU_NPU: usize = 113;
 const MENU_DISK_ACTIVITY: usize = 114;
 const MENU_DISK_SPACE: usize = 115;
 const MENU_HIDE: usize = 116;
+const MENU_DONATE: usize = 117;
+
+/// The maintainer's local NPR member station, the same link BlabberStack uses.
+const DONATE_URL: PCWSTR = w!("https://www.kuaf.com/donate");
 
 pub struct App {
     window: HWND,
@@ -635,6 +639,14 @@ impl App {
             let _ = AppendMenuW(menu, startup_flags, MENU_STARTUP, w!("Start with Windows"));
             let _ = AppendMenuW(menu, MF_STRING, MENU_RESET_POSITION, w!("Reset position"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            // Sits above Exit on purpose, sharing the separator already there:
+            // one more line, no new section (GLINT-DONATE).
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                MENU_DONATE,
+                w!("\u{2665}  Like this? Tip my local NPR station"),
+            );
             let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("Exit"));
 
             // The menu needs the foreground, or it will not dismiss properly.
@@ -676,6 +688,7 @@ impl App {
         }
 
         match id {
+            MENU_DONATE => open_url(DONATE_URL),
             MENU_HIDE => self.hide(),
             MENU_STARTUP => set_startup_enabled(!startup_enabled()),
             MENU_RESET_POSITION => {
@@ -946,6 +959,23 @@ fn write_tip(buffer: &mut [u16; 128], text: &str) {
         .zip(text.encode_utf16())
     {
         *slot = unit;
+    }
+}
+
+/// Hand a URL to whatever the user set as their browser.
+///
+/// `ShellExecuteW` delegates to a shell extension to resolve the protocol
+/// handler, and that needs COM on the calling thread. The app initialises it
+/// nowhere else, so without this the call silently does nothing: it reports
+/// failure only through a return value under 32, which is easy to miss.
+fn open_url(url: PCWSTR) {
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        ShellExecuteW(None, w!("open"), url, None, None, SW_SHOWNORMAL);
     }
 }
 

@@ -697,6 +697,35 @@ The path is quoted, so a space in it cannot split the command.
 
 ---
 
+### GLINT-DONATE: A tip link in the right click menu
+
+**Applies to:** glint
+**Verification:** manual
+
+The right click menu shall carry one line,
+`♥  Like this? Tip my local NPR station`, which opens
+`https://www.kuaf.com/donate` in the default browser.
+
+It sits directly above **Exit**, sharing the separator already there, so it
+adds one line and no new section. The wording and the link match the
+maintainer's BlabberStack project; KUAF is their local NPR member station and
+is not affiliated with glint.
+
+`ShellExecuteW` resolves a URL protocol handler through a shell extension,
+which needs COM initialised on the calling thread. glint initialises it
+nowhere else, so `open_url` does it. Without that the call fails silently:
+it reports the problem only as a return value under 32, and the menu item
+looks like it simply does nothing. That is exactly how it first shipped into
+test, and how it was caught.
+
+**Verification (manual):**
+
+1. Right click the tray icon. The line sits above **Exit** with a heart.
+2. Click it. The default browser opens the KUAF donation page.
+3. The window and the tray icon are unaffected.
+
+---
+
 ### GLINT-RESUME: The sampler rebuilds after sleep
 
 **Applies to:** glint
