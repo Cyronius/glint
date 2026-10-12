@@ -6,13 +6,12 @@ with the numbers behind it. Pick which measurements to show from the right
 click menu; both the icon and the window follow. The window stays open and on
 top until it is minimized, and a hidden window costs almost nothing.
 
-![The glint window and its tray icon climbing to red under load, then falling back to idle](docs/demo.gif)
+![The glint window and its tray icon under load while a download moves the network strip](docs/demo.gif)
 
 The tray strip under the window is shown at 3x. Seven strips, top to bottom: CPU, memory, GPU, NPU, disk activity, network, temperature.
 Each fills to its current reading and turns amber at 80% (80 °C for temperature) and red at 95%. Hover for the numbers.
 Network is the busiest adapter's share of its link speed, so it reads low on a fast link. Temp is the hottest
-firmware thermal zone, not the CPU die, which Windows does not expose without a driver. The images below
-were captured before those two were added and show five strips.
+firmware thermal zone, not the CPU die, which Windows does not expose without a driver.
 
 ![Glint window](docs/screenshot.png)
 
