@@ -38,6 +38,8 @@ pub const MEMORY_HUE: COLORREF = rgb(0xA7, 0x8B, 0xFA);
 pub const GPU_HUE: COLORREF = rgb(0x34, 0xD3, 0x99);
 pub const NPU_HUE: COLORREF = rgb(0x22, 0xD3, 0xEE);
 pub const DISK_HUE: COLORREF = rgb(0x94, 0xA3, 0xB8);
+pub const NETWORK_HUE: COLORREF = rgb(0xF4, 0x72, 0xB6);
+pub const TEMP_HUE: COLORREF = rgb(0xA3, 0xE6, 0x35);
 
 /// GLINT-ALERT-COLOR thresholds.
 const AMBER: COLORREF = rgb(0xF5, 0x9E, 0x0B);
@@ -112,28 +114,43 @@ pub struct Shown {
     pub gpu: bool,
     pub npu: bool,
     pub disk_activity: bool,
+    pub network: bool,
+    pub temp: bool,
     pub disk_space: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Hardware {
+    pub gpu: bool,
+    pub npu: bool,
+    pub network: bool,
+    pub temp: bool,
+    pub volumes: bool,
+}
+
 impl Shown {
-    pub fn resolve(
-        show: &crate::config::Show,
-        has_gpu: bool,
-        has_npu: bool,
-        has_volumes: bool,
-    ) -> Self {
+    pub fn resolve(show: &crate::config::Show, has: Hardware) -> Self {
         Self {
             cpu: show.cpu,
             memory: show.memory,
-            gpu: show.gpu && has_gpu,
-            npu: show.npu && has_npu,
+            gpu: show.gpu && has.gpu,
+            npu: show.npu && has.npu,
             disk_activity: show.disk_activity,
-            disk_space: show.disk_space && has_volumes,
+            network: show.network && has.network,
+            temp: show.temp && has.temp,
+            disk_space: show.disk_space && has.volumes,
         }
     }
 
     pub fn any(&self) -> bool {
-        self.cpu || self.memory || self.gpu || self.npu || self.disk_activity || self.disk_space
+        self.cpu
+            || self.memory
+            || self.gpu
+            || self.npu
+            || self.disk_activity
+            || self.network
+            || self.temp
+            || self.disk_space
     }
 }
 
@@ -145,6 +162,8 @@ pub struct Layout {
     pub height: i32,
     /// The minimize button, which hides the window (GLINT-MINIMIZE).
     pub minimize_rect: RECT,
+    /// GLINT-TASKMGR.
+    pub taskmgr_rect: RECT,
     /// The bottom of the header strip. A drag starts above this line.
     pub header_bottom: i32,
     pub shown: Shown,
@@ -171,7 +190,13 @@ impl Layout {
         if shown.memory {
             height += row + detail;
         }
-        for present in [shown.gpu, shown.npu, shown.disk_activity] {
+        for present in [
+            shown.gpu,
+            shown.npu,
+            shown.disk_activity,
+            shown.network,
+            shown.temp,
+        ] {
             if present {
                 height += row;
             }
@@ -190,6 +215,7 @@ impl Layout {
         let button = scale(design::BUTTON, dpi);
         let header_top = pad;
         let minimize_right = width - pad;
+        let taskmgr_right = minimize_right - button - pad / 2;
         Self {
             dpi,
             width,
@@ -198,6 +224,12 @@ impl Layout {
                 left: minimize_right - button,
                 top: header_top,
                 right: minimize_right,
+                bottom: header_top + button,
+            },
+            taskmgr_rect: RECT {
+                left: taskmgr_right - button,
+                top: header_top,
+                right: taskmgr_right,
                 bottom: header_top + button,
             },
             header_bottom: header_top + button,
@@ -220,6 +252,7 @@ pub fn contains(rect: &RECT, point: POINT) -> bool {
 struct Row<'a> {
     label: &'a str,
     percent: f32,
+    unit: &'static str,
     hue: COLORREF,
     history: &'a History,
     detail: Option<String>,
@@ -378,6 +411,7 @@ impl Renderer {
                 &Row {
                     label: "CPU",
                     percent: metrics.cpu,
+                    unit: "%",
                     hue: CPU_HUE,
                     history: &history.cpu,
                     // GLINT-CPU-BOOST: the clock and the ratio to the base clock.
@@ -395,6 +429,7 @@ impl Renderer {
                 &Row {
                     label: "MEM",
                     percent: metrics.memory,
+                    unit: "%",
                     hue: MEMORY_HUE,
                     history: &history.memory,
                     detail: Some(format!(
@@ -412,6 +447,7 @@ impl Renderer {
                 &Row {
                     label: "GPU",
                     percent: metrics.gpu.unwrap_or(0.0),
+                    unit: "%",
                     hue: GPU_HUE,
                     history: &history.gpu,
                     detail: None,
@@ -426,6 +462,7 @@ impl Renderer {
                 &Row {
                     label: "NPU",
                     percent: metrics.npu.unwrap_or(0.0),
+                    unit: "%",
                     hue: NPU_HUE,
                     history: &history.npu,
                     detail: None,
@@ -439,8 +476,37 @@ impl Renderer {
                 &Row {
                     label: "DISK",
                     percent: metrics.disk,
+                    unit: "%",
                     hue: DISK_HUE,
                     history: &history.disk,
+                    detail: None,
+                },
+                y,
+            );
+        }
+        if shown.network {
+            y = self.draw_row(
+                layout,
+                &Row {
+                    label: "NET",
+                    percent: metrics.network.unwrap_or(0.0),
+                    unit: "%",
+                    hue: NETWORK_HUE,
+                    history: &history.network,
+                    detail: None,
+                },
+                y,
+            );
+        }
+        if shown.temp {
+            y = self.draw_row(
+                layout,
+                &Row {
+                    label: "TEMP",
+                    percent: metrics.temp.unwrap_or(0.0),
+                    unit: "\u{00B0}C",
+                    hue: TEMP_HUE,
+                    history: &history.temp,
                     detail: None,
                 },
                 y,
@@ -486,11 +552,38 @@ impl Renderer {
         let header = RECT {
             left: pad,
             top: pad,
-            right: layout.minimize_rect.left - pad / 2,
+            right: layout.taskmgr_rect.left - pad / 2,
             bottom: pad + layout.scale(design::HEADER),
         };
         self.text("Glint", &header, TEXT_DIM, self.font_label, DT_LEFT);
+        self.draw_taskmgr(layout);
         self.draw_minimize(layout);
+    }
+
+    fn draw_taskmgr(&mut self, layout: &Layout) {
+        let rect = layout.taskmgr_rect;
+        self.rounded(&rect, BACKGROUND, SEPARATOR);
+        let size = rect.right - rect.left;
+        let bar = (size / 8).max(1);
+        let gap = (size / 10).max(1);
+        let inner = bar * 3 + gap * 2;
+        let left = rect.left + (size - inner) / 2;
+        let bottom = rect.bottom - size / 4;
+        for (index, height) in [size * 3 / 10, size * 5 / 10, size * 7 / 10]
+            .into_iter()
+            .enumerate()
+        {
+            let x = left + index as i32 * (bar + gap);
+            self.fill(
+                &RECT {
+                    left: x,
+                    top: bottom - height,
+                    right: x + bar,
+                    bottom,
+                },
+                TEXT_DIM,
+            );
+        }
     }
 
     /// A single bar. Clicking it hides the window (GLINT-MINIMIZE).
@@ -528,7 +621,7 @@ impl Renderer {
             right: label.right + layout.scale(design::VALUE_WIDTH),
             bottom: top + row_height,
         };
-        let percent = format!("{:.0}%", row.percent);
+        let percent = format!("{:.0}{}", row.percent, row.unit);
         self.text(&percent, &value, color, self.font_value, DT_RIGHT);
 
         let spark_height = layout.scale(design::SPARK_HEIGHT);
