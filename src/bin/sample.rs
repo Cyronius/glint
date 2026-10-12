@@ -9,7 +9,7 @@
 //! wrong LUID.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use glint::luid::{parse_engine_instance, AdapterLuid};
 use glint::pdh::Query;
@@ -86,9 +86,14 @@ fn main() {
         Err(error) => return println!("sampler failed to start: {error}"),
     };
 
+    let mut tick_time = Duration::ZERO;
     for round in 0..=rounds {
         std::thread::sleep(Duration::from_millis(1000));
+        let started = Instant::now();
         let metrics = sampler.tick();
+        if round > 0 {
+            tick_time += started.elapsed();
+        }
         if round == 0 {
             println!("(first tick primes the rate counters)");
             continue;
@@ -103,8 +108,18 @@ fn main() {
             .map(|value| format!("{value:4.0}%"))
             .unwrap_or_else(|| "  --".to_string());
 
+        let network = metrics
+            .network
+            .map(|value| format!("{value:4.1}%"))
+            .unwrap_or_else(|| "  --".to_string());
+
+        let temp = metrics
+            .temp
+            .map(|value| format!("{value:3.0}C"))
+            .unwrap_or_else(|| " --".to_string());
+
         println!(
-            "CPU {:3.0}% {:.2} GHz ({:.2}x) | MEM {:3.0}% {:.1}/{:.1} GiB | GPU {} | NPU {} | DISK {:3.0}%",
+            "CPU {:3.0}% {:.2} GHz ({:.2}x) | MEM {:3.0}% {:.1}/{:.1} GiB | GPU {} | NPU {} | DISK {:3.0}% | NET {} | TEMP {}",
             metrics.cpu,
             metrics.cpu_ghz,
             metrics.cpu_ratio,
@@ -114,6 +129,8 @@ fn main() {
             gpu,
             npu,
             metrics.disk,
+            network,
+            temp,
         );
 
         if round == 1 {
@@ -128,4 +145,8 @@ fn main() {
             }
         }
     }
+    println!(
+        "mean tick: {:.3} ms",
+        tick_time.as_secs_f64() * 1000.0 / f64::from(rounds.max(1))
+    );
 }

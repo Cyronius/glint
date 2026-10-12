@@ -1,18 +1,20 @@
 # glint
 
 A tray system monitor for Windows. A tray icon opens a small borderless window
-with CPU, memory, GPU, NPU and disk statistics. The window stays open and on
-top until it is minimized. The idle cost is near zero.
+with CPU, memory, GPU, NPU, disk, network and temperature statistics. The
+window stays open and on top until it is minimized. The idle cost is near zero.
 
-Home repo: `glint`. Requirement prefix: `SG`.
+Home repo: `glint`. Requirement prefix: `GLINT`.
 
 ## Scope
 
-In scope: the five resource rows, the live tray icon, the popup window, the
-minimize button, disk space, choosing which measurements show, and start with
-Windows.
+In scope: the seven resource rows, the live tray icon, the popup window, the
+minimize and Task Manager buttons, disk space, choosing which measurements
+show, and start with Windows.
 
-Out of scope: per-process lists, temperatures, fan speeds, a taskbar AppBar,
+Out of scope: per-process lists, CPU die and per-component temperatures (the
+Temp row reads one firmware sensor; see GLINT-TEMP-METRIC), fan speeds, a
+taskbar AppBar,
 a Windows 11 Widgets Board provider (see **Why not the Widgets Board**), and
 history beyond 60 seconds.
 
@@ -31,7 +33,8 @@ history beyond 60 seconds.
 | Settings persistence | `src/config.rs` |
 
 Probe binaries: `spike` (Spike 1), `wildcard` (PDH wildcard behaviour),
-`sample` (console sampler), `cpucheck` (CPU counter semantics).
+`sample` (console sampler), `cpucheck` (CPU counter semantics), `netcheck`
+(network counters, and the adapter table that replaced them).
 
 ---
 
@@ -122,6 +125,16 @@ another process held a core busy, so the bars changed on most ticks:
 |-------|-------------|---------------|-----|
 | Hidden, 2 s poll, live icon | 15.6 MB | 6.18 MB | 0.052% of one core over 30 s |
 
+Re-measured on 2026-10-12 with the Network strip and the Task Manager button,
+under the timing lock, while a Dropbox upload kept the Network strip moving:
+
+| State | Working set | Private bytes | CPU |
+|-------|-------------|---------------|-----|
+| Hidden, 2 s poll, six strips | 16.0 MB | 6.07 MB | 0.104% of one core over 60 s |
+
+That sits inside the 0.05% to 0.44% range quoted under GLINT-TRAY-BARS. A
+settled network would land nearer the low end.
+
 Idle cost is no longer literally zero, and this requirement no longer claims
 it is. 0.05% of one core is below what Task Manager will show.
 
@@ -159,6 +172,8 @@ MEM   39%
 GPU    0%
 NPU    0%
 DISK   8%
+NET    3%
+TEMP  62°C
 ```
 
 Both come from one list in `src/trayicon.rs`, so the icon and the hover text
@@ -183,11 +198,12 @@ pixels. The icon is therefore drawn at `SM_CXSMICON` and kept crisp, and the
 tip of each bar is antialiased by hand so a percentage still reads between
 whole pixels.
 
-Horizontal strips replaced vertical columns for the same reason. Five columns
-in 16 pixels leaves 2 pixels of width each; five strips give every value the
-full 16 pixels of length to express itself in. The bar occupies its whole
-pitch, while the track stops one row short, which keeps five idle strips from
-merging into a single grey slab.
+Horizontal strips replaced vertical columns for the same reason. Seven columns
+in 16 pixels leaves 2 pixels of width each; seven strips give every value the
+full 16 pixels of length to express itself in. Strip edges are rounded rather
+than truncated, so seven strips fill all 16 rows at 2 and 3 pixels thick
+instead of leaving a blank band. The track alternates between two shades per
+strip, which keeps seven idle strips from merging into a single grey slab.
 
 #### Cost
 
@@ -219,7 +235,7 @@ shell has been handed the new one.
 **Verification (manual):**
 
 1. Look at the tray icon. It shows one strip per selected measurement, and
-   five distinct rows are countable even when every value is low.
+   seven distinct rows are countable even when every value is low.
 2. Run a CPU load. The top strip lengthens and turns amber, then red.
 3. Hover the icon. The text lists each measurement and its percentage, in the
    same order as the strips.
@@ -237,12 +253,16 @@ shell has been handed the new one.
 **Verification:** manual
 
 The right click menu shall carry a checkable item per measurement — CPU,
-Memory, GPU, NPU, Disk activity, Disk space — and the choice shall survive a
-restart. There is no gear button: the menu opens from the tray icon and from
-the window itself, so a second control would buy nothing.
+Memory, GPU, NPU, Disk activity, Network, Temperature, Disk space — and the
+choice shall survive a restart. There is no gear button: the menu opens from
+the tray icon and from the window itself, so a second control would buy
+nothing.
 
-GPU and NPU appear only when the hardware does. A machine with no NPU never
-offers an item that would do nothing (GLINT-NPU-OPTIONAL).
+GPU, NPU, Network and Temperature appear only when the hardware does. A machine
+with no NPU never offers an item that would do nothing (GLINT-NPU-OPTIONAL), a
+machine with no physical network adapter has no Network item
+(GLINT-NETWORK-METRIC), and one whose firmware exposes no thermal zone has no
+Temperature item (GLINT-TEMP-METRIC).
 
 Hiding every measurement is allowed. The window then draws `Right click to
 choose measurements` and sizes itself to that one line, which is recoverable
@@ -273,20 +293,26 @@ The window shall be exactly as tall as the measurements it draws, and exactly
 as wide as it needs to be, with no gap at any edge.
 
 Height is the sum of the rows present: CPU and memory each add a row plus a
-detail line; GPU, NPU, disk activity and disk space each add one row.
+detail line; GPU, NPU, disk activity, network, temperature and disk space each
+add one row.
 
 Width is 300 logical pixels unless the disk space line needs more, in which
 case the window widens to fit it and never narrows below 300. Drive
 percentages are measured as `100%` whatever they currently read, so a drive
 filling up cannot make the window resize.
 
-Measured on 2026-10-08 at 96 DPI with four fixed drives:
+Measured on 2026-10-12 at 96 DPI with four fixed drives, then worked out from
+the 26 pixel row height for the other lines (the first line of the 2026-10-08
+table, 338 x 238, is the same layout without Network and Temperature):
 
 | Shown | Size |
 |-------|------|
-| Everything | 338 x 238 |
-| No disk space | 300 x 212 |
-| No disk space, no disk activity | 300 x 186 |
+| Everything | 338 x 290 |
+| No temperature | 338 x 264 |
+| No network or temperature | 338 x 238 |
+| No disk space | 300 x 264 |
+| No disk space, network or temperature | 300 x 212 |
+| And no disk activity | 300 x 186 |
 | CPU and memory only | 300 x 134 |
 | CPU only | 300 x 93 |
 | Nothing | 300 x 78 |
@@ -396,8 +422,10 @@ between the two samplers, which take their samples at different instants.
 **Applies to:** glint
 **Verification:** manual
 
-A row shall turn amber at 80% or more, and red at 95% or more. The colour
-applies to the percent text and to the sparkline. The resource label keeps its
+A row shall turn amber at 80% or more, and red at 95% or more, Network
+included. Temperature uses the same two numbers as degrees Celsius: amber at
+80 °C and red at 95 °C. The colour applies to the value text and to the
+sparkline. The resource label keeps its
 own hue, so the row stays identifiable.
 
 **Verification (manual):**
@@ -416,6 +444,126 @@ at 97% drew their percentages in red, and each drive letter kept the disk hue.
 
 A wrong threshold colour is visible on screen in one second, so this stays
 `manual`.
+
+---
+
+### GLINT-NETWORK-METRIC: The network percent is the busiest adapter's share of its link
+
+**Applies to:** glint
+**Verification:** manual
+
+The Network percent shall be, for the busiest physical adapter that is up, the
+larger of its received and sent rates as a share of that direction's link
+speed, clamped to 100 (GLINT-CLAMP). A full-speed download on a full duplex
+link therefore reads 100%, not 50%. The window draws the row as `NET`, between
+disk activity and disk space, and the tray icon carries a sixth strip.
+
+The Network row and its menu item are absent on a machine with no physical
+network adapter (GLINT-NPU-OPTIONAL's rule: never offer a toggle that does
+nothing). An adapter that is present but disconnected counts as present and
+reads 0%.
+
+**Why adapters, not counters.** The obvious source, the PDH
+`\Network Interface(*)` object, cost 2.3 to 2.8 ms per collect on this machine
+while the other counters together cost under 2 ms, and reading the values was
+negligible (0.03 ms). `GetIfTable2` lists the adapters in about 1 ms and
+`GetIfEntry2` reads one adapter's byte counters, so the sampler lists adapters
+every 10 ticks and reads only the live ones each tick. The rate is the change
+in `InOctets` and `OutOctets` over the time since the last tick. `netcheck`
+shows both sources.
+
+**Which adapters.** Only interfaces with the `HardwareInterface` flag, which
+leaves out the filter-layer entries Windows lists once per physical adapter
+(44 interfaces on this machine, 6 of them hardware), tunnels and virtual
+switches. A VPN's traffic crosses a physical adapter, so counting it too would
+count the same bytes twice. Summing adapters is wrong for the same reason, so
+the busiest one wins (compare GLINT-GPU-BUSIEST).
+
+**Caution: the figure is quiet.** The link speed is what the adapter
+negotiated, 1201 Mbit/s for this machine's Wi-Fi 7 card, and real throughput
+sits well below it. A 405 Mbit/s download read about 34%, and a Dropbox upload
+at 250 to 290 Mbit/s read 21% to 24%. The row turns amber only for a transfer
+near the link's theoretical limit. If that proves too quiet, the alternative is
+a different number, throughput against a fixed or measured ceiling, and it is a
+separate decision.
+
+**Verification (manual):**
+
+1. Open the window. A `NET` row sits above the disk space line, and the tray
+   icon has a sixth strip.
+2. Run `cargo run --release --bin netcheck`, and start a large download. The
+   `max%` column and the `NET` row move together.
+3. Run an upload instead. The row moves just as far as it does for a download.
+4. Right click the tray icon. **Network** is checked. Click it, and the row and
+   its strip disappear.
+5. Unplug or disable every adapter and restart glint. The row reads 0% if a
+   physical adapter exists, and is absent if none does.
+
+Measured on 2026-10-12 (Wi-Fi 7 card at 1201 Mbit/s, Ethernet disconnected):
+`sample` read 23%, 40%, 31%, 37% and 40% while `curl` pulled 50.7 MB/s
+(405 Mbit/s, 34% of the link). Task Manager's own figure was not compared.
+
+Tick cost, mean of three 20 second runs under the timing lock, against the same
+`sample` build without network: 1.9 to 2.0 ms before, 2.3 to 2.5 ms after, about
+0.45 ms more. The PDH route measured 3.9 to 5.3 ms. Whether the `*` wildcard
+would have picked up an adapter that appeared later was never settled, since
+the adapter list is rescanned instead.
+
+---
+
+### GLINT-TEMP-METRIC: The Temp row is the hottest firmware thermal zone
+
+**Applies to:** glint
+**Verification:** manual
+
+The Temp value shall be the hottest zone of
+`\Thermal Zone Information(*)\Temperature`, converted from kelvin to degrees
+Celsius and clamped to 0 to 100 (GLINT-CLAMP). The window draws it as
+`TEMP 73°C`, after the Network row, and the tray icon carries a seventh strip
+filled in proportion to the temperature on a 0 to 100 °C scale. GLINT-ALERT-COLOR
+applies in degrees: amber at 80 °C, red at 95 °C. The hover text line reads
+`TEMP  73°C`.
+
+**This is not the CPU temperature.** ACPI thermal zones are defined by the
+machine's maker, and Windows does not say which sensor a zone reads. It may be
+the CPU package, a board sensor or the chassis. It is also updated slowly and
+can sit well away from the die temperature that tools such as HWiNFO show, which
+needs a kernel driver. So the row is labelled `TEMP` and the menu item
+`Temperature`, never `CPU`. A true CPU die reading belongs in an addon, not in
+glint (see the keyboard-rows plan for the addon design).
+
+The row and its menu item are absent when the counter does not exist or every
+zone reports 0 K, which is what a machine with no sensor behind its zone
+does. The PDH route needs no administrator rights. The WMI route,
+`MSAcpi_ThermalZoneTemperature`, returned "Access denied" without them.
+
+Like every measurement, the row defaults to visible. A new row that nobody asked
+for is one right click away from gone, and a row that fails to parse and then
+vanishes would look like a sampler bug (GLINT-CONFIG-PARSE).
+
+**Verification (manual):**
+
+1. Open the window. A `TEMP` row shows a value in `°C` under the Network row.
+2. Hover the tray icon. The last line reads `TEMP` with a `°C` value.
+3. Start a sustained CPU load, such as a full build. Watch whether the value
+   rises. If it never moves while the CPU is busy, the zone is not telling you
+   about the CPU, and the row is of little use on that machine.
+4. Right click the tray icon. **Temperature** is checked. Click it, and the row
+   and its strip disappear.
+5. On a machine with no thermal zone, the menu has no **Temperature** item.
+
+Observed on 2026-10-12 on a ThinkPad with a Ryzen AI 9 HX PRO 370: one zone,
+`_TZ.THM0`. PowerShell's `Get-Counter` read 355 K (82 °C) and the `sample` probe
+read 73 to 74 °C a few minutes later, while other sessions kept the CPU and
+GPU busy. Step 3 has not been run on a clean load, so how closely this zone
+follows the CPU is unmeasured.
+
+**Cost is unmeasured.** The timing lock was never free of other sessions' GPU
+and NPU work on 2026-10-12, so no clean number exists for what the Thermal Zone
+counter adds to a tick. The PDH Network object turned out to cost 2.3 to 2.8 ms
+per collect (GLINT-NETWORK-METRIC), so measure before release: run `sample`
+against a build without this row under `lock.py timing`, and measure the hidden
+idle cost with the row on.
 
 ---
 
@@ -640,7 +788,44 @@ hover delay.
 2. Click the tray icon to reopen it.
 3. Drag the header anywhere except the two buttons. The window moves.
 4. Press and drag on the minimize button. The window does not move.
+   (GLINT-TASKMGR has the matching step for its own button.)
 5. Rest the pointer on the minimize button. A tooltip reads "Minimize to tray".
+
+---
+
+### GLINT-TASKMGR: A button opens Task Manager
+
+**Applies to:** glint
+**Verification:** manual
+
+The window header shall carry a button immediately left of the minimize button,
+the same size and style, drawn as three rising bars. A click on it shall start
+Task Manager and leave the window open. The button does not start a drag, and
+shows an "Open Task Manager" tooltip after the standard hover delay.
+
+The button only starts the program. Sorting Task Manager by a column from the
+outside is not supported: it takes no command-line arguments, and its sort
+state lives in `%LOCALAPPDATA%\Microsoft\Windows\TaskManager\settings.json`,
+which it rewrites on exit.
+
+The launch is `ShellExecuteW` on `taskmgr.exe`, the call the tip link already
+uses, so the button adds no dependency. On this machine it opened Task Manager
+without a UAC prompt, because Task Manager auto-elevates for an administrator;
+a standard user could still be asked for credentials.
+
+**Verification (manual):**
+
+1. Open the window. A bar-chart button sits left of minimize.
+2. Click it. Task Manager opens, and the glint window stays open.
+3. Press and drag on it. The window does not move.
+4. Rest the pointer on it. The tooltip reads "Open Task Manager", and the
+   minimize tooltip still reads "Minimize to tray".
+5. Drag the window to a monitor at a different scale. Both buttons rescale and
+   the `Glint` label is not clipped.
+
+Checked on 2026-10-12 at 96 DPI by synthesized click, drag and hover with
+screenshots: steps 1 to 4. Step 5 was not run. The Task Manager it started was
+elevated, so a non-elevated process, glint included, cannot close it.
 
 ---
 
@@ -733,7 +918,9 @@ test, and how it was caught.
 
 The app shall re-create its PDH query on `PBT_APMRESUMEAUTOMATIC` and
 `PBT_APMRESUMESUSPEND`. PDH state does not survive a sleep and resume cycle,
-and a stale query returns frozen values with no error.
+and a stale query returns frozen values with no error. The same rebuild lists
+the network adapters again and drops the byte counts the Network rate was
+measured from, so no rate spans the sleep (GLINT-NETWORK-METRIC).
 
 **Verification (manual):**
 
@@ -748,7 +935,7 @@ and a stale query returns frozen values with no error.
 **Applies to:** glint
 **Verification:** test
 
-`%APPDATA%\glint\config.json` shall hold the window position and the six
+`%APPDATA%\glint\config.json` shall hold the window position and the eight
 visibility booleans (GLINT-KPI-TOGGLE). The reader shall fall back to the
 defaults for any key that is missing, unknown or damaged, and shall never
 fail. The retired `pinned` and `diskExpanded` keys from older files are
@@ -775,13 +962,20 @@ no way to tell the difference; a row that stays is self-correcting.
 - `"not json at all"`, `""` and `{"x":` each give the defaults
 - `{"x": 10}` and `{"y": 10}` each give `position = None`
 - An unknown key is ignored, and the known keys still read correctly
-- `{}` gives every one of the six visibility flags as `true`
-- `{"gpu": false}` hides the GPU row and leaves the other five visible
-- All six of `cpu`, `memory`, `gpu`, `npu`, `diskActivity`, `diskSpace` set to
-  `false` gives every flag `false`
+- `{}` gives every one of the eight visibility flags as `true`
+- `{"gpu": false}` hides the GPU row and leaves the other seven visible
+- `{"network": false}` hides the Network row and leaves the other seven visible
+- `{"temp": false}` hides the Temp row and leaves the other seven visible
+- All eight of `cpu`, `memory`, `gpu`, `npu`, `diskActivity`, `network`,
+  `temp`, `diskSpace` set to `false` gives every flag `false`
+- `{"temp": }`, `{"temp": yes}` and `{"temp":` each leave the Temp row visible
+- `{"network": false, "temp": true}` and the reverse each set exactly the one
+  named, so the two keys do not cross-match
 - `{"gpu": }`, `{"gpu": yes}` and `{"gpu":` each leave the GPU row visible
+- `{"network": }`, `{"network": yes}` and `{"network":` each leave the Network
+  row visible
 - `{"diskActivity": false, "diskSpace": true}` sets exactly those two, so the
-  two similar keys do not cross-match
+  two similar keys do not cross-match, and neither touches `network`
 - `{"x": -1200, "y": 48, "npu": false}` keeps both the position and the
   hidden row
 
@@ -909,6 +1103,12 @@ whole query (GLINT-RESUME).
 
 The plan allowed 2 ms, so there is no worker thread and no second poll rate.
 Reused buffers keep a steady tick at zero allocations.
+
+Re-measured on 2026-10-12 with the `sample` binary, which times `Sampler::tick`
+after the first one: 1.9 to 2.0 ms for the baseline build on this machine, and
+2.3 to 2.5 ms with Network (GLINT-NETWORK-METRIC). The 2026-10-05 figure above
+came from `spike`, with different bookkeeping and a quieter machine, so compare
+the 2026-10-12 pair with each other rather than with the 0.43 ms.
 
 ## Open items
 

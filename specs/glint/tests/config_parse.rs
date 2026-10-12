@@ -63,6 +63,8 @@ fn every_measurement_defaults_to_visible() {
             gpu: true,
             npu: true,
             disk_activity: true,
+            network: true,
+            temp: true,
             disk_space: true,
         }
     );
@@ -73,13 +75,67 @@ fn a_hidden_measurement_reads_back_hidden() {
     let show = Config::parse("{\"gpu\": false}").show;
     assert!(!show.gpu);
     // The others keep their default, rather than following the one that moved.
-    assert!(show.cpu && show.memory && show.npu && show.disk_activity && show.disk_space);
+    assert!(
+        show.cpu
+            && show.memory
+            && show.npu
+            && show.disk_activity
+            && show.network
+            && show.disk_space
+    );
+}
+
+#[test]
+fn a_hidden_network_row_reads_back_hidden() {
+    let show = Config::parse("{\"network\": false}").show;
+    assert!(!show.network);
+    assert!(
+        show.cpu && show.memory && show.gpu && show.npu && show.disk_activity && show.disk_space
+    );
+}
+
+#[test]
+fn a_damaged_network_flag_falls_back_to_visible() {
+    assert!(Config::parse("{\"network\": }").show.network);
+    assert!(Config::parse("{\"network\": yes}").show.network);
+    assert!(Config::parse("{\"network\":").show.network);
+}
+
+#[test]
+fn network_does_not_cross_match_the_other_keys() {
+    let show = Config::parse("{\"diskActivity\": false, \"diskSpace\": false}").show;
+    assert!(show.network);
+    let show = Config::parse("{\"network\": false}").show;
+    assert!(show.disk_activity && show.disk_space);
+}
+
+#[test]
+fn a_hidden_temp_row_reads_back_hidden() {
+    let show = Config::parse("{\"temp\": false}").show;
+    assert!(!show.temp);
+    assert!(show.cpu && show.network && show.disk_activity && show.disk_space);
+}
+
+#[test]
+fn a_damaged_temp_flag_falls_back_to_visible() {
+    assert!(Config::parse("{\"temp\": }").show.temp);
+    assert!(Config::parse("{\"temp\": yes}").show.temp);
+    assert!(Config::parse("{\"temp\":").show.temp);
+}
+
+#[test]
+fn temp_and_network_do_not_cross_match() {
+    let show = Config::parse("{\"network\": false, \"temp\": true}").show;
+    assert!(!show.network && show.temp);
+    let show = Config::parse("{\"network\": true, \"temp\": false}").show;
+    assert!(show.network && !show.temp);
 }
 
 #[test]
 fn every_measurement_can_be_hidden_at_once() {
     let text = "{\"cpu\": false, \"memory\": false, \"gpu\": false, \
-                \"npu\": false, \"diskActivity\": false, \"diskSpace\": false}";
+                \"npu\": false, \"diskActivity\": false, \"network\": false, \
+                \"temp\": false, \"diskSpace\": false}";
     let show = Config::parse(text).show;
     assert_eq!(
         show,
@@ -89,6 +145,8 @@ fn every_measurement_can_be_hidden_at_once() {
             gpu: false,
             npu: false,
             disk_activity: false,
+            network: false,
+            temp: false,
             disk_space: false,
         }
     );

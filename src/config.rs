@@ -23,6 +23,8 @@ pub struct Show {
     pub gpu: bool,
     pub npu: bool,
     pub disk_activity: bool,
+    pub network: bool,
+    pub temp: bool,
     pub disk_space: bool,
 }
 
@@ -35,6 +37,8 @@ impl Default for Show {
             gpu: true,
             npu: true,
             disk_activity: true,
+            network: true,
+            temp: true,
             disk_space: true,
         }
     }
@@ -79,6 +83,8 @@ impl Config {
             gpu: read_bool(text, "gpu").unwrap_or(fallback.gpu),
             npu: read_bool(text, "npu").unwrap_or(fallback.npu),
             disk_activity: read_bool(text, "diskActivity").unwrap_or(fallback.disk_activity),
+            network: read_bool(text, "network").unwrap_or(fallback.network),
+            temp: read_bool(text, "temp").unwrap_or(fallback.temp),
             disk_space: read_bool(text, "diskSpace").unwrap_or(fallback.disk_space),
         };
         Self { position, show }
@@ -95,8 +101,15 @@ impl Config {
         }
         let show = self.show;
         text.push_str(&format!(
-            "  \"cpu\": {},\n  \"memory\": {},\n  \"gpu\": {},\n  \"npu\": {},\n  \"diskActivity\": {},\n  \"diskSpace\": {}\n",
-            show.cpu, show.memory, show.gpu, show.npu, show.disk_activity, show.disk_space
+            "  \"cpu\": {},\n  \"memory\": {},\n  \"gpu\": {},\n  \"npu\": {},\n  \"diskActivity\": {},\n  \"network\": {},\n  \"temp\": {},\n  \"diskSpace\": {}\n",
+            show.cpu,
+            show.memory,
+            show.gpu,
+            show.npu,
+            show.disk_activity,
+            show.network,
+            show.temp,
+            show.disk_space
         ));
         text.push_str("}\n");
         let _ = std::fs::write(&path, text);

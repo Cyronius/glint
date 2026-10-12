@@ -16,7 +16,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::render::{
-    alert_color, rgb_parts, Shown, CPU_HUE, DISK_HUE, GPU_HUE, MEMORY_HUE, NPU_HUE,
+    alert_color, rgb_parts, Shown, CPU_HUE, DISK_HUE, GPU_HUE, MEMORY_HUE, NETWORK_HUE, NPU_HUE,
+    TEMP_HUE,
 };
 use crate::sampler::Metrics;
 
@@ -154,22 +155,28 @@ fn icon_size() -> i32 {
 ///
 /// Disk space is left out on purpose: it is per drive, so it has no single
 /// value a bar could show.
-fn bars(metrics: &Metrics, shown: Shown) -> Vec<(&'static str, f32, COLORREF)> {
-    let mut bars = Vec::with_capacity(5);
+fn bars(metrics: &Metrics, shown: Shown) -> Vec<(&'static str, f32, &'static str, COLORREF)> {
+    let mut bars = Vec::with_capacity(7);
     if shown.cpu {
-        bars.push(("CPU", metrics.cpu, CPU_HUE));
+        bars.push(("CPU", metrics.cpu, "%", CPU_HUE));
     }
     if shown.memory {
-        bars.push(("MEM", metrics.memory, MEMORY_HUE));
+        bars.push(("MEM", metrics.memory, "%", MEMORY_HUE));
     }
     if shown.gpu {
-        bars.push(("GPU", metrics.gpu.unwrap_or(0.0), GPU_HUE));
+        bars.push(("GPU", metrics.gpu.unwrap_or(0.0), "%", GPU_HUE));
     }
     if shown.npu {
-        bars.push(("NPU", metrics.npu.unwrap_or(0.0), NPU_HUE));
+        bars.push(("NPU", metrics.npu.unwrap_or(0.0), "%", NPU_HUE));
     }
     if shown.disk_activity {
-        bars.push(("DISK", metrics.disk, DISK_HUE));
+        bars.push(("DISK", metrics.disk, "%", DISK_HUE));
+    }
+    if shown.network {
+        bars.push(("NET", metrics.network.unwrap_or(0.0), "%", NETWORK_HUE));
+    }
+    if shown.temp {
+        bars.push(("TEMP", metrics.temp.unwrap_or(0.0), "\u{00B0}C", TEMP_HUE));
     }
     bars
 }
@@ -179,10 +186,10 @@ fn bars(metrics: &Metrics, shown: Shown) -> Vec<(&'static str, f32, COLORREF)> {
 /// The tooltip reads top to bottom in the order the strips are stacked, which
 /// is the only thing naming them: the icon has no room for letters. Both come
 /// from this one list so they cannot drift apart.
-pub fn readings(metrics: &Metrics, shown: Shown) -> Vec<(&'static str, f32)> {
+pub fn readings(metrics: &Metrics, shown: Shown) -> Vec<(&'static str, f32, &'static str)> {
     bars(metrics, shown)
         .into_iter()
-        .map(|(label, percent, _)| (label, percent))
+        .map(|(label, value, unit, _)| (label, value, unit))
         .collect()
 }
 
@@ -196,7 +203,9 @@ pub fn signature(metrics: &Metrics, shown: Shown) -> Vec<i32> {
     let size = icon_size();
     bars(metrics, shown)
         .iter()
-        .map(|(_, percent, _)| ((percent.clamp(0.0, 100.0) / 100.0) * size as f32).round() as i32)
+        .map(|(_, percent, _, _)| {
+            ((percent.clamp(0.0, 100.0) / 100.0) * size as f32).round() as i32
+        })
         .collect()
 }
 
@@ -218,12 +227,13 @@ pub fn metric_icon(metrics: &Metrics, shown: Shown) -> HICON {
         return HICON::default();
     };
 
+    // Rounded edges, so seven strips fill all 16 rows instead of leaving a blank band.
     let count = bars.len() as i32;
-    let pitch = (size / count).max(1);
-    let top = (size - pitch * count) / 2;
+    let edge = |index: i32| (index * size + count / 2) / count;
 
-    for (index, (_, percent, hue)) in bars.iter().enumerate() {
-        let y = top + index as i32 * pitch;
+    for (index, (_, percent, _, hue)) in bars.iter().enumerate() {
+        let y = edge(index as i32);
+        let pitch = (edge(index as i32 + 1) - y).max(1);
         canvas.rect(0, y, size, pitch, TRACK, TRACK_ALPHA[index % 2]);
 
         let color = rgb_parts(alert_color(*percent, *hue));

@@ -1,15 +1,18 @@
 # glint
 
 A tray system monitor for Windows. The tray icon is a live bar chart of CPU,
-memory, GPU, NPU and disk, and clicking it opens a small borderless window
+memory, GPU, NPU, disk, network and temperature, and clicking it opens a small borderless window
 with the numbers behind it. Pick which measurements to show from the right
 click menu; both the icon and the window follow. The window stays open and on
 top until it is minimized, and a hidden window costs almost nothing.
 
 ![The glint window and its tray icon climbing to red under load, then falling back to idle](docs/demo.gif)
 
-The tray strip under the window is shown at 3x. Five strips, top to bottom: CPU, memory, GPU, NPU, disk activity. 
-Each fills to its current percentage and turns amber at 80% and red at 95%. Hover for the numbers.
+The tray strip under the window is shown at 3x. Seven strips, top to bottom: CPU, memory, GPU, NPU, disk activity, network, temperature.
+Each fills to its current reading and turns amber at 80% (80 °C for temperature) and red at 95%. Hover for the numbers.
+Network is the busiest adapter's share of its link speed, so it reads low on a fast link. Temp is the hottest
+firmware thermal zone, not the CPU die, which Windows does not expose without a driver. The images below
+were captured before those two were added and show five strips.
 
 ![Glint window](docs/screenshot.png)
 
@@ -20,7 +23,7 @@ cargo build --release
 target\release\glint.exe
 ```
 
-The release binary is about 195 KB. Private memory stays near 6.2 MB, and a
+The release binary is about 200 KB. Private memory stays near 6.2 MB, and a
 hidden window costs between 0.05% and 0.4% of one core depending on how much
 the readings are moving.
 
@@ -31,12 +34,13 @@ The window opens in the lower right corner, clear of the taskbar.
 | Watch the tray icon | One bar per measurement, filled to the current reading |
 | Left click the tray icon | Show the window, or hide it when it is open |
 | Right click the tray icon | Choose measurements, Hide, Start with Windows, Reset position, tip link, Exit |
+| Task Manager button | Open Task Manager, left of the minimize button |
 | Minimize button | Hide the window; hover for a tooltip |
 | Drag the header | Move the window; the position is remembered |
 
 The right click menu carries a check mark per measurement — CPU, Memory, GPU,
-NPU, Disk activity, Disk space. GPU and NPU appear only when the hardware
-does. The window is exactly as large as the measurements it draws, so hiding
+NPU, Disk activity, Network, Temperature, Disk space. GPU, NPU, Network and
+Temperature appear only when the hardware does. The window is exactly as large as the measurements it draws, so hiding
 rows makes it smaller, the tray icon loses the matching strip, and the choice
 survives a restart.
 
@@ -66,6 +70,8 @@ thing asking for anything.
 | `cargo run --release --bin wildcard` | Whether a PDH wildcard counter re-expands |
 | `cargo run --release --bin sample` | The sampler, as console output |
 | `cargo run --release --bin cpucheck` | How `% Processor Utility` reacts to clock boost |
+| `cargo run --release --bin netcheck` | Per-adapter send and receive rates against link speed |
+| `cargo run --release --bin netcheck -- iftable` | The adapter table the Network row reads, and what it costs |
 
 ## Tests
 

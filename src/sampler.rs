@@ -3,6 +3,8 @@
 //! Spike 1 measured the whole tick at 0.43 ms mean, so the sampler runs on
 //! the UI thread with no worker and no second poll rate.
 
+use std::time::Instant;
+
 use crate::luid::{parse_engine_instance, AdapterLuid};
 use crate::pdh::{Counter, PdhError, Query};
 use crate::wddm;
@@ -17,6 +19,10 @@ const CPU_UTILITY: &str = r"\Processor Information(_Total)\% Processor Utility";
 const CPU_PERFORMANCE: &str = r"\Processor Information(_Total)\% Processor Performance";
 const DISK_IDLE: &str = r"\PhysicalDisk(_Total)\% Idle Time";
 const GPU_ENGINE: &str = r"\GPU Engine(*)\Utilization Percentage";
+const THERMAL_ZONE: &str = r"\Thermal Zone Information(*)\Temperature";
+
+/// Ticks between adapter scans; a scan costs about 1 ms and a read far less.
+const NET_LINKS_EVERY: u64 = 10;
 
 /// A ring of recent samples, oldest first when read.
 #[derive(Clone, Copy, Debug)]
@@ -104,6 +110,10 @@ pub struct Metrics {
     pub npu: Option<f32>,
     /// Disk active time, which is `100 - % Idle Time`.
     pub disk: f32,
+    /// `None` until a rate exists or when there is no physical adapter (GLINT-NETWORK-METRIC).
+    pub network: Option<f32>,
+    /// Degrees Celsius of the hottest ACPI thermal zone, clamped to 0 to 100 (GLINT-TEMP-METRIC).
+    pub temp: Option<f32>,
     pub volumes: Vec<Volume>,
 }
 
@@ -115,6 +125,8 @@ pub struct Histories {
     pub gpu: History,
     pub npu: History,
     pub disk: History,
+    pub network: History,
+    pub temp: History,
 }
 
 impl Histories {
@@ -122,6 +134,12 @@ impl Histories {
         self.cpu.push(metrics.cpu);
         self.memory.push(metrics.memory);
         self.disk.push(metrics.disk);
+        if let Some(network) = metrics.network {
+            self.network.push(network);
+        }
+        if let Some(temp) = metrics.temp {
+            self.temp.push(temp);
+        }
         if let Some(gpu) = metrics.gpu {
             self.gpu.push(gpu);
         }
@@ -175,12 +193,34 @@ impl EngineSums {
     }
 }
 
+/// A physical adapter; one that was down at the last scan is not read each tick.
+#[derive(Clone, Copy)]
+struct NetLink {
+    luid: u64,
+    up: bool,
+}
+
+/// What an adapter's byte counters read at the last tick.
+#[derive(Clone, Copy)]
+struct NetSeen {
+    luid: u64,
+    received: u64,
+    sent: u64,
+}
+
 pub struct Sampler {
     query: Query,
     cpu_utility: Option<Counter>,
     cpu_performance: Option<Counter>,
     disk_idle: Option<Counter>,
     gpu_engine: Option<Counter>,
+    thermal_zone: Option<Counter>,
+    has_temp: bool,
+    /// The physical network adapters, rescanned every `NET_LINKS_EVERY` ticks.
+    net_links: Vec<NetLink>,
+    net_seen: Vec<NetSeen>,
+    net_prev: Vec<NetSeen>,
+    net_at: Option<Instant>,
     base_mhz: u32,
     gpu_luid: Option<AdapterLuid>,
     npu_luid: Option<AdapterLuid>,
@@ -203,6 +243,12 @@ impl Sampler {
             cpu_performance: None,
             disk_idle: None,
             gpu_engine: None,
+            thermal_zone: None,
+            has_temp: false,
+            net_links: Vec::new(),
+            net_seen: Vec::new(),
+            net_prev: Vec::new(),
+            net_at: None,
             base_mhz: base_clock_mhz(),
             gpu_luid,
             npu_luid,
@@ -221,8 +267,15 @@ impl Sampler {
         self.cpu_performance = self.query.add_optional(CPU_PERFORMANCE);
         self.disk_idle = self.query.add_optional(DISK_IDLE);
         self.gpu_engine = self.query.add_optional(GPU_ENGINE);
+        self.thermal_zone = self.query.add_optional(THERMAL_ZONE);
         let _ = self.query.collect();
         self.primed = false;
+        // A gauge reads after one collect, so presence is known before the first tick.
+        self.has_temp = self.read_temp().is_some();
+        self.net_seen.clear();
+        self.net_prev.clear();
+        self.net_at = None;
+        read_net_links(&mut self.net_links);
     }
 
     /// Rebuild the query from scratch. Sleep and resume invalidates PDH
@@ -235,6 +288,7 @@ impl Sampler {
         self.cpu_performance = None;
         self.disk_idle = None;
         self.gpu_engine = None;
+        self.thermal_zone = None;
         self.query = Query::new()?;
         self.open_counters();
         Ok(())
@@ -253,6 +307,16 @@ impl Sampler {
     /// short before growing a second later.
     pub fn has_gpu(&self) -> bool {
         self.gpu_luid.is_some()
+    }
+
+    /// True when the firmware exposes a thermal zone, so the UI offers the Temp row.
+    pub fn has_temp(&self) -> bool {
+        self.has_temp
+    }
+
+    /// True when a physical adapter exists, so the UI offers the Network row.
+    pub fn has_network(&self) -> bool {
+        !self.net_links.is_empty()
     }
 
     /// Sample every counter once.
@@ -296,6 +360,14 @@ impl Sampler {
 
             self.read_engines(&mut metrics);
         }
+        if self.has_temp {
+            metrics.temp = self.read_temp();
+        }
+        if self.ticks % NET_LINKS_EVERY == 0 {
+            read_net_links(&mut self.net_links);
+        }
+        // Every tick, the first included, so the next one has a baseline.
+        self.read_network(&mut metrics, first);
 
         // Read disk space on the first tick, then every 30 s.
         if self.volumes.is_empty() || self.ticks % DISK_SPACE_EVERY == 1 {
@@ -303,6 +375,76 @@ impl Sampler {
         }
         metrics.volumes = self.volumes.clone();
         metrics
+    }
+
+    /// The hottest zone in Celsius; the counter reports kelvin.
+    fn read_temp(&mut self) -> Option<f32> {
+        let counter = self.thermal_zone.as_mut()?;
+        let mut hottest = 0.0f64;
+        counter
+            .for_each_instance(|_, kelvin| hottest = hottest.max(kelvin))
+            .ok()?;
+        // A zone that reports 0 K has no sensor behind it.
+        (hottest > 0.0).then(|| (hottest - 273.15).clamp(0.0, 100.0) as f32)
+    }
+
+    /// Busiest adapter wins; summing would count a VPN's traffic twice (GLINT-NETWORK-METRIC).
+    fn read_network(&mut self, metrics: &mut Metrics, first: bool) {
+        use windows::Win32::NetworkManagement::IpHelper::{GetIfEntry2, MIB_IF_ROW2};
+        use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+
+        let now = Instant::now();
+        let seconds = self
+            .net_at
+            .map_or(0.0, |before| now.duration_since(before).as_secs_f64());
+        self.net_at = Some(now);
+
+        // Swap rather than clone, so a steady tick allocates nothing.
+        std::mem::swap(&mut self.net_prev, &mut self.net_seen);
+        self.net_seen.clear();
+        let mut busiest = 0.0f64;
+        for &NetLink { luid, up } in &self.net_links {
+            if !up {
+                continue;
+            }
+            let mut row = MIB_IF_ROW2::default();
+            row.InterfaceLuid.Value = luid;
+            if unsafe { GetIfEntry2(&mut row) }.0 != 0 || row.OperStatus != IfOperStatusUp {
+                continue;
+            }
+            self.net_seen.push(NetSeen {
+                luid,
+                received: row.InOctets,
+                sent: row.OutOctets,
+            });
+            let Some(last) = self.net_prev.iter().find(|last| last.luid == luid) else {
+                continue;
+            };
+            if seconds <= 0.0 {
+                continue;
+            }
+            // Each direction against its own link speed, in case the link is asymmetric.
+            let share = |bytes: u64, speed: u64| {
+                if speed == 0 {
+                    0.0
+                } else {
+                    bytes as f64 * 8.0 / seconds / speed as f64 * 100.0
+                }
+            };
+            let received = share(
+                row.InOctets.saturating_sub(last.received),
+                row.ReceiveLinkSpeed,
+            );
+            let sent = share(
+                row.OutOctets.saturating_sub(last.sent),
+                row.TransmitLinkSpeed,
+            );
+            busiest = busiest.max(received).max(sent);
+        }
+
+        if !first && !self.net_links.is_empty() {
+            metrics.network = Some(busiest.clamp(0.0, 100.0) as f32);
+        }
     }
 
     /// Sum `GPU Engine` utilization for the two adapters that the UI shows.
@@ -340,6 +482,31 @@ impl Sampler {
             metrics.npu = Some(self.npu_sums.busiest());
         }
     }
+}
+
+/// Physical adapters only: the hardware flag drops filter-layer duplicates and virtual switches.
+fn read_net_links(out: &mut Vec<NetLink>) {
+    use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+    use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+
+    out.clear();
+    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    if unsafe { GetIfTable2(&mut table) }.0 != 0 || table.is_null() {
+        return;
+    }
+    let rows = unsafe {
+        std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize)
+    };
+    for row in rows {
+        const HARDWARE: u8 = 1;
+        if row.InterfaceAndOperStatusFlags._bitfield & HARDWARE != 0 {
+            out.push(NetLink {
+                luid: unsafe { row.InterfaceLuid.Value },
+                up: row.OperStatus == IfOperStatusUp,
+            });
+        }
+    }
+    unsafe { FreeMibTable(table.cast()) };
 }
 
 /// Read the CPU base clock in MHz.

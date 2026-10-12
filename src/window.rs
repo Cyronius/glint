@@ -47,7 +47,7 @@ use windows::Win32::UI::Controls::{
 };
 
 use crate::config::Config;
-use crate::render::{contains, Layout, Renderer, Shown};
+use crate::render::{contains, Hardware, Layout, Renderer, Shown};
 use crate::sampler::{Histories, Metrics, Sampler};
 
 /// The message the tray sends for icon events.
@@ -78,6 +78,8 @@ const MENU_DISK_ACTIVITY: usize = 114;
 const MENU_DISK_SPACE: usize = 115;
 const MENU_HIDE: usize = 116;
 const MENU_DONATE: usize = 117;
+const MENU_NETWORK: usize = 118;
+const MENU_TEMP: usize = 119;
 
 /// The maintainer's local NPR member station, the same link BlabberStack uses.
 const DONATE_URL: PCWSTR = w!("https://www.kuaf.com/donate");
@@ -114,6 +116,7 @@ const TOOLINFO_SIZE: u32 = (size_of::<TTTOOLINFOW>() - size_of::<*mut u8>()) as 
 
 /// Tooltip tool id for the minimize button.
 const TIP_MINIMIZE: usize = 1;
+const TIP_TASKMGR: usize = 2;
 
 impl App {
     /// Build the window, the tray icon and the sampler.
@@ -164,7 +167,16 @@ impl App {
             window,
             layout: Layout::new(
                 dpi,
-                Shown::resolve(&config.show, sampler.has_gpu(), sampler.has_npu(), false),
+                Shown::resolve(
+                    &config.show,
+                    Hardware {
+                        gpu: sampler.has_gpu(),
+                        npu: sampler.has_npu(),
+                        network: sampler.has_network(),
+                        temp: sampler.has_temp(),
+                        volumes: false,
+                    },
+                ),
                 0,
             ),
             sampler,
@@ -266,12 +278,7 @@ impl App {
     /// micro-bar per measurement (GLINT-TRAY-BARS). The old icon is destroyed
     /// only after the shell has been handed the new one.
     fn update_tray(&mut self) {
-        let shown = Shown::resolve(
-            &self.config.show,
-            self.sampler.has_gpu(),
-            self.sampler.has_npu(),
-            !self.metrics.volumes.is_empty(),
-        );
+        let shown = self.shown();
         let signature = crate::trayicon::signature(&self.metrics, shown);
         if signature == self.tray_signature {
             return;
@@ -282,11 +289,11 @@ impl App {
         // icon itself has no room to label them.
         let readings = crate::trayicon::readings(&self.metrics, shown);
         let mut text = String::with_capacity(64);
-        for (label, percent) in &readings {
+        for (label, value, unit) in &readings {
             if !text.is_empty() {
                 text.push('\n');
             }
-            text.push_str(&format!("{label:<4} {percent:>3.0}%"));
+            text.push_str(&format!("{label:<4} {value:>3.0}{unit}"));
         }
         if text.is_empty() {
             text.push_str("Glint - right click to choose measurements");
@@ -347,14 +354,22 @@ impl App {
         }
     }
 
+    fn shown(&self) -> Shown {
+        Shown::resolve(
+            &self.config.show,
+            Hardware {
+                gpu: self.sampler.has_gpu(),
+                npu: self.sampler.has_npu(),
+                network: self.sampler.has_network(),
+                temp: self.sampler.has_temp(),
+                volumes: !self.metrics.volumes.is_empty(),
+            },
+        )
+    }
+
     /// The layout the current settings and metrics ask for (GLINT-FIT).
     fn wanted_layout(&mut self) -> Layout {
-        let shown = Shown::resolve(
-            &self.config.show,
-            self.sampler.has_gpu(),
-            self.sampler.has_npu(),
-            !self.metrics.volumes.is_empty(),
-        );
+        let shown = self.shown();
         let disk_width = if shown.disk_space {
             self.renderer
                 .disk_line_width(self.dpi, &self.metrics.volumes)
@@ -412,7 +427,7 @@ impl App {
                 return;
             };
             self.tooltip = tooltip;
-            for (id, rect) in [(TIP_MINIMIZE, self.layout.minimize_rect)] {
+            for (id, rect) in self.tooltip_regions() {
                 let info = TTTOOLINFOW {
                     cbSize: TOOLINFO_SIZE,
                     uFlags: TTF_SUBCLASS,
@@ -427,12 +442,19 @@ impl App {
         }
     }
 
+    fn tooltip_regions(&self) -> [(usize, RECT); 2] {
+        [
+            (TIP_MINIMIZE, self.layout.minimize_rect),
+            (TIP_TASKMGR, self.layout.taskmgr_rect),
+        ]
+    }
+
     /// Keep the hover regions on the buttons after a resize or a DPI change.
     fn update_tooltips(&self) {
         if self.tooltip.0.is_null() {
             return;
         }
-        for (id, rect) in [(TIP_MINIMIZE, self.layout.minimize_rect)] {
+        for (id, rect) in self.tooltip_regions() {
             let info = TTTOOLINFOW {
                 cbSize: TOOLINFO_SIZE,
                 hwnd: self.window,
@@ -586,6 +608,9 @@ impl App {
             // GLINT-MINIMIZE: the window stays open until this, the tray
             // icon or the menu closes it.
             self.hide();
+        } else if contains(&self.layout.taskmgr_rect, point) {
+            // GLINT-TASKMGR: the window stays open behind Task Manager.
+            shell_open(w!("taskmgr.exe"));
         }
     }
 
@@ -627,6 +652,12 @@ impl App {
                 MENU_DISK_ACTIVITY,
                 w!("Disk activity"),
             );
+            if self.sampler.has_network() {
+                let _ = AppendMenuW(menu, ticked(show.network), MENU_NETWORK, w!("Network"));
+            }
+            if self.sampler.has_temp() {
+                let _ = AppendMenuW(menu, ticked(show.temp), MENU_TEMP, w!("Temperature"));
+            }
             let _ = AppendMenuW(
                 menu,
                 ticked(show.disk_space),
@@ -672,6 +703,8 @@ impl App {
             MENU_GPU => Some(&mut show.gpu),
             MENU_NPU => Some(&mut show.npu),
             MENU_DISK_ACTIVITY => Some(&mut show.disk_activity),
+            MENU_NETWORK => Some(&mut show.network),
+            MENU_TEMP => Some(&mut show.temp),
             MENU_DISK_SPACE => Some(&mut show.disk_space),
             _ => None,
         };
@@ -688,7 +721,7 @@ impl App {
         }
 
         match id {
-            MENU_DONATE => open_url(DONATE_URL),
+            MENU_DONATE => shell_open(DONATE_URL),
             MENU_HIDE => self.hide(),
             MENU_STARTUP => set_startup_enabled(!startup_enabled()),
             MENU_RESET_POSITION => {
@@ -836,7 +869,8 @@ unsafe extern "system" fn window_proc(
         WM_LBUTTONDOWN => {
             let point = mouse_point(lparam);
             // The header is the drag handle. The minimize button is not.
-            let on_button = contains(&app.layout.minimize_rect, point);
+            let on_button = contains(&app.layout.minimize_rect, point)
+                || contains(&app.layout.taskmgr_rect, point);
             if point.y < app.layout.header_bottom && !on_button {
                 app.dragging = true;
                 unsafe {
@@ -873,7 +907,11 @@ unsafe extern "system" fn window_proc(
         WM_NOTIFY => {
             let header = unsafe { &mut *(lparam.0 as *mut NMTTDISPINFOW) };
             if header.hdr.code == TTN_GETDISPINFOW {
-                let text = "Minimize to tray";
+                let text = if header.hdr.idFrom == TIP_TASKMGR {
+                    "Open Task Manager"
+                } else {
+                    "Minimize to tray"
+                };
                 for (slot, unit) in header.szText.iter_mut().zip(text.encode_utf16().chain([0])) {
                     *slot = unit;
                 }
@@ -962,13 +1000,13 @@ fn write_tip(buffer: &mut [u16; 128], text: &str) {
     }
 }
 
-/// Hand a URL to whatever the user set as their browser.
+/// Hand a URL or program to the shell, such as the user's browser.
 ///
 /// `ShellExecuteW` delegates to a shell extension to resolve the protocol
 /// handler, and that needs COM on the calling thread. The app initialises it
 /// nowhere else, so without this the call silently does nothing: it reports
 /// failure only through a return value under 32, which is easy to miss.
-fn open_url(url: PCWSTR) {
+fn shell_open(url: PCWSTR) {
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
