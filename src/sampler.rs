@@ -15,7 +15,7 @@ pub const HISTORY: usize = 60;
 /// Ticks between disk space reads. Free space moves slowly.
 const DISK_SPACE_EVERY: u64 = 30;
 
-const CPU_UTILITY: &str = r"\Processor Information(_Total)\% Processor Utility";
+const CPU_TIME: &str = r"\Processor Information(_Total)\% Processor Time";
 const CPU_PERFORMANCE: &str = r"\Processor Information(_Total)\% Processor Performance";
 const DISK_IDLE: &str = r"\PhysicalDisk(_Total)\% Idle Time";
 const GPU_ENGINE: &str = r"\GPU Engine(*)\Utilization Percentage";
@@ -210,7 +210,7 @@ struct NetSeen {
 
 pub struct Sampler {
     query: Query,
-    cpu_utility: Option<Counter>,
+    cpu_time: Option<Counter>,
     cpu_performance: Option<Counter>,
     disk_idle: Option<Counter>,
     gpu_engine: Option<Counter>,
@@ -239,7 +239,7 @@ impl Sampler {
         let npu_luid = wddm::npu(&adapters).map(|a| a.luid);
         let mut sampler = Self {
             query: Query::new()?,
-            cpu_utility: None,
+            cpu_time: None,
             cpu_performance: None,
             disk_idle: None,
             gpu_engine: None,
@@ -263,7 +263,7 @@ impl Sampler {
     }
 
     fn open_counters(&mut self) {
-        self.cpu_utility = self.query.add_optional(CPU_UTILITY);
+        self.cpu_time = self.query.add_optional(CPU_TIME);
         self.cpu_performance = self.query.add_optional(CPU_PERFORMANCE);
         self.disk_idle = self.query.add_optional(DISK_IDLE);
         self.gpu_engine = self.query.add_optional(GPU_ENGINE);
@@ -284,7 +284,7 @@ impl Sampler {
         let adapters = wddm::enumerate();
         self.gpu_luid = wddm::primary_gpu(&adapters).map(|a| a.luid);
         self.npu_luid = wddm::npu(&adapters).map(|a| a.luid);
-        self.cpu_utility = None;
+        self.cpu_time = None;
         self.cpu_performance = None;
         self.disk_idle = None;
         self.gpu_engine = None;
@@ -334,7 +334,7 @@ impl Sampler {
 
         if !first {
             metrics.cpu = self
-                .cpu_utility
+                .cpu_time
                 .as_ref()
                 .and_then(|counter| counter.value().ok())
                 .unwrap_or(0.0)

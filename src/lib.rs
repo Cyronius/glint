@@ -2,6 +2,7 @@
 
 pub mod adapters;
 pub mod config;
+pub mod install;
 pub mod luid;
 pub mod pdh;
 pub mod render;

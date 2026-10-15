@@ -80,6 +80,7 @@ const MENU_HIDE: usize = 116;
 const MENU_DONATE: usize = 117;
 const MENU_NETWORK: usize = 118;
 const MENU_TEMP: usize = 119;
+const MENU_INSTALL: usize = 120;
 
 /// The maintainer's local NPR member station, the same link BlabberStack uses.
 const DONATE_URL: PCWSTR = w!("https://www.kuaf.com/donate");
@@ -667,6 +668,9 @@ impl App {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, MENU_HIDE, w!("Hide"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            if !crate::install::is_installed() {
+                let _ = AppendMenuW(menu, MF_STRING, MENU_INSTALL, w!("Install for me"));
+            }
             let _ = AppendMenuW(menu, startup_flags, MENU_STARTUP, w!("Start with Windows"));
             let _ = AppendMenuW(menu, MF_STRING, MENU_RESET_POSITION, w!("Reset position"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -723,6 +727,13 @@ impl App {
         match id {
             MENU_DONATE => shell_open(DONATE_URL),
             MENU_HIDE => self.hide(),
+            MENU_INSTALL => {
+                if crate::install::confirm_install() && crate::install::install_and_relaunch() {
+                    unsafe {
+                        let _ = DestroyWindow(self.window);
+                    }
+                }
+            }
             MENU_STARTUP => set_startup_enabled(!startup_enabled()),
             MENU_RESET_POSITION => {
                 self.config.position = None;
@@ -1041,6 +1052,24 @@ fn startup_enabled() -> bool {
 }
 
 fn set_startup_enabled(enable: bool) {
+    if enable {
+        if let Ok(exe) = std::env::current_exe() {
+            write_startup(Some(&exe));
+        }
+    } else {
+        write_startup(None);
+    }
+}
+
+/// After an install, move an existing Run value to the new path. Never turns startup on.
+pub fn repoint_startup(exe: &std::path::Path) {
+    if startup_enabled() {
+        write_startup(Some(exe));
+    }
+}
+
+/// `Some(path)` writes the Run value, `None` deletes it.
+fn write_startup(exe: Option<&std::path::Path>) {
     use windows::Win32::System::Registry::{
         RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
         KEY_SET_VALUE, REG_SZ,
@@ -1051,14 +1080,8 @@ fn set_startup_enabled(enable: bool) {
     if opened.is_err() {
         return;
     }
-    if enable {
+    if let Some(exe) = exe {
         // The path is quoted, so a space in it cannot split the command.
-        let Ok(exe) = std::env::current_exe() else {
-            unsafe {
-                let _ = RegCloseKey(key);
-            }
-            return;
-        };
         let quoted = format!("\"{}\"", exe.display());
         let units: Vec<u16> = quoted.encode_utf16().chain(std::iter::once(0)).collect();
         let bytes = unsafe {

@@ -10,7 +10,7 @@ Home repo: `glint`. Requirement prefix: `GLINT`.
 
 In scope: the seven resource rows, the live tray icon, the popup window, the
 minimize and Task Manager buttons, disk space, choosing which measurements
-show, and start with Windows.
+show, start with Windows, and a first-run self-install.
 
 Out of scope: per-process lists, CPU die and per-component temperatures (the
 Temp row reads one firmware sensor; see GLINT-TEMP-METRIC), fan speeds, a
@@ -28,6 +28,7 @@ history beyond 60 seconds.
 | Adapter discovery through DXCore (spike only) | `src/adapters.rs` |
 | Metric sampling | `src/sampler.rs` |
 | GDI drawing | `src/render.rs` |
+| First-run install and relaunch | `src/install.rs` |
 | Tray icon pixels | `src/trayicon.rs` |
 | Window, tray icon, interaction | `src/window.rs` |
 | Settings persistence | `src/config.rs` |
@@ -882,6 +883,47 @@ The path is quoted, so a space in it cannot split the command.
 
 ---
 
+### GLINT-INSTALL: A first run offers to install glint
+
+**Applies to:** glint
+**Verification:** manual
+
+When glint starts in a release build from anywhere other than
+`%LOCALAPPDATA%\Programs\Glint\`, it shall ask once whether to install itself
+there, in a small window with three buttons:
+
+- **Install for me** copies the exe to `%LOCALAPPDATA%\Programs\Glint\glint.exe`, starts
+  that copy and exits. An existing Start with Windows value is re-pointed at
+  the copy. The value is never created by install.
+- **Don't ask again** writes `"installPrompt": "declined"` to the config, and the prompt
+  never appears again.
+- **Not now**, the close button and Esc ask again on the next launch. Only
+  **Don't ask again** persists, so a stray Esc cannot disable the offer.
+
+The right click menu shall show **Install for me** whenever the running exe is
+not in the install folder, declined or not. The item is gone once glint runs
+from the install folder. If the copy fails (the installed copy is running), the
+user is told to exit it, and glint carries on from where it is.
+
+The single-instance mutex (GLINT-SINGLE-INSTANCE) is released before the copy
+starts, or the copy would see "already running" and quit.
+
+**Verification (manual):**
+
+1. Delete `%APPDATA%\Glint\config.json` and the install folder. Run a release
+   `glint.exe` from another folder. The prompt appears before the tray icon.
+2. Choose Not now. Run again. The prompt appears again.
+3. Choose Don't ask again. Run again. No prompt, and the menu shows **Install for me**.
+4. Choose **Install for me**. The install folder holds `glint.exe`, the tray
+   icon returns from that copy, and the first process is gone.
+5. Right click the icon. **Install for me** is no longer listed.
+6. With Start with Windows on, repeat step 4 from another folder. The Run value
+   now holds the install path. With it off, it stays off.
+7. Run another copy from elsewhere while the installed one runs, then choose
+   **Install for me**. A message asks you to exit the running copy.
+
+---
+
 ### GLINT-DONATE: A tip link in the right click menu
 
 **Applies to:** glint
@@ -935,8 +977,9 @@ measured from, so no rate spans the sleep (GLINT-NETWORK-METRIC).
 **Applies to:** glint
 **Verification:** test
 
-`%APPDATA%\glint\config.json` shall hold the window position and the eight
-visibility booleans (GLINT-KPI-TOGGLE). The reader shall fall back to the
+`%APPDATA%\glint\config.json` shall hold the window position, the eight
+visibility booleans (GLINT-KPI-TOGGLE) and the install-prompt choice
+(GLINT-INSTALL). The reader shall fall back to the
 defaults for any key that is missing, unknown or damaged, and shall never
 fail. The retired `pinned` and `diskExpanded` keys from older files are
 ignored.
@@ -978,6 +1021,11 @@ no way to tell the difference; a row that stays is self-correcting.
   two similar keys do not cross-match, and neither touches `network`
 - `{"x": -1200, "y": 48, "npu": false}` keeps both the position and the
   hidden row
+- `{}` gives `install_declined = false`
+- `{"installPrompt": "declined"}` gives `install_declined = true`
+- `{"installPrompt": }`, `{"installPrompt": 5}` and `{"installPrompt":` each
+  give `install_declined = false`
+- `installPrompt` does not disturb the position or the visibility flags
 
 Tests: `specs/glint/tests/config_parse.rs`
 

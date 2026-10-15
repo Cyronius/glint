@@ -25,13 +25,13 @@ use crate::sampler::{History, Metrics};
 
 /// Build a `COLORREF` from red, green and blue. Win32 orders the bytes
 /// as blue, green, red, which is the reverse of the usual hex notation.
-const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
+pub(crate) const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
     COLORREF((red as u32) | ((green as u32) << 8) | ((blue as u32) << 16))
 }
 
-const BACKGROUND: COLORREF = rgb(0x1C, 0x1C, 0x1E);
-const TEXT_DIM: COLORREF = rgb(0x8E, 0x8E, 0x93);
-const SEPARATOR: COLORREF = rgb(0x38, 0x38, 0x3A);
+pub(crate) const BACKGROUND: COLORREF = rgb(0x1C, 0x1C, 0x1E);
+pub(crate) const TEXT_DIM: COLORREF = rgb(0x8E, 0x8E, 0x93);
+pub(crate) const SEPARATOR: COLORREF = rgb(0x38, 0x38, 0x3A);
 
 pub const CPU_HUE: COLORREF = rgb(0x4C, 0x9A, 0xFF);
 pub const MEMORY_HUE: COLORREF = rgb(0xA7, 0x8B, 0xFA);
@@ -877,7 +877,7 @@ fn gib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0 * 1024.0)
 }
 
-fn font(height: i32, weight: i32) -> HFONT {
+pub(crate) fn font(height: i32, weight: i32) -> HFONT {
     let face: Vec<u16> = "Segoe UI".encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         CreateFontW(

@@ -5,19 +5,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use windows::core::w;
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS};
 use windows::Win32::System::Threading::CreateMutexW;
 
 /// Hold the single-instance mutex for as long as the app runs.
-struct SingleInstance(HANDLE);
+struct SingleInstance;
 
 impl Drop for SingleInstance {
     fn drop(&mut self) {
-        if !self.0.is_invalid() {
-            unsafe {
-                let _ = CloseHandle(self.0);
-            }
-        }
+        glint::install::release_instance();
     }
 }
 
@@ -37,7 +33,8 @@ fn claim_single_instance() -> Option<SingleInstance> {
         }
         return None;
     }
-    Some(SingleInstance(handle))
+    glint::install::hold_instance(handle);
+    Some(SingleInstance)
 }
 
 fn main() {
@@ -45,6 +42,10 @@ fn main() {
         // A second launch is not an error. The first instance owns the icon.
         return;
     };
+    // Debug builds skip the prompt so `cargo run` does not nag.
+    if !cfg!(debug_assertions) && !glint::install::is_installed() && glint::install::offer() {
+        return;
+    }
     if let Err(error) = glint::window::run() {
         report(&format!("glint could not start.\n\n{error}"));
     }

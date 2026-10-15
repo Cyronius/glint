@@ -172,3 +172,30 @@ fn a_position_and_a_hidden_row_survive_together() {
     assert_eq!(config.position, Some((-1200, 48)));
     assert!(!config.show.npu);
 }
+
+#[test]
+fn the_install_prompt_is_not_declined_by_default() {
+    assert!(!Config::parse("{}").install_declined);
+    assert!(!Config::default().install_declined);
+}
+
+#[test]
+fn a_declined_install_prompt_is_read() {
+    assert!(Config::parse("{\"installPrompt\": \"declined\"}").install_declined);
+}
+
+#[test]
+fn a_damaged_install_prompt_counts_as_not_asked() {
+    assert!(!Config::parse("{\"installPrompt\": }").install_declined);
+    assert!(!Config::parse("{\"installPrompt\": 5}").install_declined);
+    assert!(!Config::parse("{\"installPrompt\":").install_declined);
+}
+
+#[test]
+fn the_install_prompt_does_not_disturb_other_keys() {
+    let config = Config::parse("{\"x\": 7, \"y\": 9, \"gpu\": false, \"installPrompt\": \"declined\"}");
+    assert_eq!(config.position, Some((7, 9)));
+    assert!(!config.show.gpu);
+    assert!(config.show.cpu);
+    assert!(config.install_declined);
+}

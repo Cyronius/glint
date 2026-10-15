@@ -13,6 +13,8 @@ pub struct Config {
     /// the tray icon".
     pub position: Option<(i32, i32)>,
     pub show: Show,
+    /// The user chose "don't ask again" at the first-run install prompt.
+    pub install_declined: bool,
 }
 
 /// Which measurements the window draws (GLINT-KPI-TOGGLE).
@@ -87,7 +89,12 @@ impl Config {
             temp: read_bool(text, "temp").unwrap_or(fallback.temp),
             disk_space: read_bool(text, "diskSpace").unwrap_or(fallback.disk_space),
         };
-        Self { position, show }
+        let install_declined = read_str(text, "installPrompt") == Some("declined");
+        Self {
+            position,
+            show,
+            install_declined,
+        }
     }
 
     pub fn save(&self) {
@@ -123,6 +130,11 @@ fn value_after<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let rest = &text[at + quoted.len()..];
     let colon = rest.find(':')?;
     Some(rest[colon + 1..].trim_start())
+}
+
+fn read_str<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let value = value_after(text, key)?.strip_prefix('"')?;
+    Some(&value[..value.find('"')?])
 }
 
 fn read_bool(text: &str, key: &str) -> Option<bool> {
