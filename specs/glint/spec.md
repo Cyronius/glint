@@ -170,6 +170,20 @@ under the timing lock, while a Dropbox upload kept the Network strip moving:
 |-------|-------------|---------------|-----|
 | Hidden, 2 s poll, six strips | 16.0 MB | 6.07 MB | 0.104% of one core over 60 s |
 
+Re-measured on 2026-10-16 with the sampler on its own thread (GLINT-TRAY-RESPONSIVE).
+Both builds ran with every row on and the window hidden, 60 s each, twice, on a
+machine with background activity, so the CPU figures are noisy:
+
+| Build | Run 1 CPU | Run 2 CPU | Private bytes | Working set | Threads |
+|-------|-----------|-----------|---------------|-------------|---------|
+| 0.4.1, sampling on the UI thread | 0.286% | 0.677% | 6.19 to 6.38 MB | 16.0 MB | 4 |
+| 0.4.2, sampling on its own thread | 0.365% | 0.520% | 6.50 to 6.69 MB | 16.0 to 16.3 MB | 5 |
+
+The two ranges overlap, so the worker adds no measurable CPU. It adds one
+thread and about 0.1 to 0.5 MB of private memory. These readings sit above the
+0.104% of 2026-10-12, which the background activity explains. The 0.4.1 build
+read as high in the same session.
+
 That sits inside the 0.05% to 0.44% range quoted under GLINT-TRAY-BARS. A
 settled network would land nearer the low end.
 
