@@ -98,7 +98,14 @@ threads), the round trip of a `WM_NULL` sent to the glint window every 50 ms:
 | Build | p99 | Worst |
 |-------|-----|-------|
 | Sampling on the UI thread (0.4.1) | 38 ms | 1933 ms |
-| Sampling on its own thread | 17 ms | 114 ms |
+| Sampling on its own thread, debug build | 17 ms | 114 ms |
+| Sampling on its own thread, release build (two runs) | 2.4 ms, 4.5 ms | 31 ms, 85 ms |
+
+The same load makes `sample -- 60 --burn` (release) report a mean tick of 414
+ms, a 99th percentile of 3.2 s and a worst of 3.4 s. That is the sampler's own
+time, which the UI thread no longer waits on, and it is the reproduction that
+step 2 above asks for. It is not a UI stall, so it does not belong in the
+table.
 
 ---
 
