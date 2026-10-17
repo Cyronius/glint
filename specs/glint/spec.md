@@ -170,6 +170,9 @@ under the timing lock, while a Dropbox upload kept the Network strip moving:
 |-------|-------------|---------------|-----|
 | Hidden, 2 s poll, six strips | 16.0 MB | 6.07 MB | 0.104% of one core over 60 s |
 
+That sits inside the 0.05% to 0.44% range quoted under GLINT-TRAY-BARS. A
+settled network would land nearer the low end.
+
 Re-measured on 2026-10-16 with the sampler on its own thread (GLINT-TRAY-RESPONSIVE).
 Both builds ran with every row on and the window hidden, 60 s each, twice, on a
 machine with background activity, so the CPU figures are noisy:
@@ -183,9 +186,6 @@ The two ranges overlap, so the worker adds no measurable CPU. It adds one
 thread and about 0.1 to 0.5 MB of private memory. These readings sit above the
 0.104% of 2026-10-12, which the background activity explains. The 0.4.1 build
 read as high in the same session.
-
-That sits inside the 0.05% to 0.44% range quoted under GLINT-TRAY-BARS. A
-settled network would land nearer the low end.
 
 Idle cost is no longer literally zero, and this requirement no longer claims
 it is. 0.05% of one core is below what Task Manager will show.
