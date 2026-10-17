@@ -26,7 +26,7 @@ history beyond 60 seconds.
 | `GPU Engine` instance name parse | `src/luid.rs` |
 | Adapter discovery through WDDM | `src/wddm.rs` |
 | Adapter discovery through DXCore (spike only) | `src/adapters.rs` |
-| Metric sampling | `src/sampler.rs` |
+| Metric sampling, on its own thread | `src/sampler.rs` |
 | GDI drawing | `src/render.rs` |
 | First-run install and relaunch | `src/install.rs` |
 | Tray icon pixels | `src/trayicon.rs` |
@@ -62,6 +62,43 @@ both shows the window and hides it again before it can be seen.
 4. Left click once more. The window appears again.
 5. Repeat steps 2 to 4 with the icon in the overflow flyout (the `^`
    chevron).
+
+---
+
+### GLINT-TRAY-RESPONSIVE: A tray click lands however busy the machine is
+
+**Applies to:** glint
+**Verification:** manual
+
+A click on the tray icon shall show or hide the window at once, however busy
+the machine is. Sampling runs on its own thread, so a slow system call delays
+the next reading, never the click. The UI thread makes no sampling call.
+
+On a machine saturated by other processes, `GetIfTable2` took about a second
+(2.6 s at worst) and `GetIfEntry2` over 100 ms, against 3.6 ms and 0.6 ms
+idle. Run on the UI thread, a click made during such a call waited in the
+queue. A second click then arrived with it, so the window showed and hid again
+before it painted, and nothing appeared.
+
+The window opens on the last reading, at most one hidden poll (2 s) old, and
+the fresh reading follows one tick later.
+
+**Verification (manual):**
+
+1. Start glint with the window hidden.
+2. Run `cargo run --release --bin sample -- 60 --burn`. The worst tick it
+   reports is over 500 ms, which shows the load reproduces the stall.
+3. While it runs, left click the tray icon 20 times, about once a second.
+   Every click toggles the window, with no visible delay.
+4. Right click the tray icon. The menu opens at once.
+
+Measured on 2026-10-16 (24 logical CPUs, another process running 48 spinning
+threads), the round trip of a `WM_NULL` sent to the glint window every 50 ms:
+
+| Build | p99 | Worst |
+|-------|-----|-------|
+| Sampling on the UI thread (0.4.1) | 38 ms | 1933 ms |
+| Sampling on its own thread | 17 ms | 114 ms |
 
 ---
 
@@ -467,7 +504,8 @@ reads 0%.
 **Why adapters, not counters.** The obvious source, the PDH
 `\Network Interface(*)` object, cost 2.3 to 2.8 ms per collect on this machine
 while the other counters together cost under 2 ms, and reading the values was
-negligible (0.03 ms). `GetIfTable2` lists the adapters in about 1 ms and
+negligible (0.03 ms). `GetIfTable2` lists the adapters in about 1 to 4 ms at idle (a second or more on a
+saturated machine, see GLINT-TRAY-RESPONSIVE) and
 `GetIfEntry2` reads one adapter's byte counters, so the sampler lists adapters
 every 10 ticks and reads only the live ones each tick. The rate is the change
 in `InOctets` and `OutOctets` over the time since the last tick. `netcheck`
@@ -1149,8 +1187,16 @@ whole query (GLINT-RESUME).
 | `PdhGetFormattedCounterArrayW` plus parse | 0.18 ms mean |
 | Total per tick | 0.43 ms mean, 0.81 ms worst |
 
-The plan allowed 2 ms, so there is no worker thread and no second poll rate.
-Reused buffers keep a steady tick at zero allocations.
+The plan allowed 2 ms, so the first versions had no worker thread and no
+second poll rate. Reused buffers keep a steady tick at zero allocations.
+
+Those were idle averages, and they hid the cost that matters. Measured on
+2026-10-16, a tick took 8.6 ms median at idle. With another process running 48
+spinning threads on 24 logical CPUs it took 41 ms median and over a second on
+the ticks that rescan the network adapters (`GetIfTable2`: 3.6 ms idle, 979 ms
+loaded). The sampler therefore runs on its own thread (GLINT-TRAY-RESPONSIVE).
+`sample` now reports the 99th percentile and worst tick, and `--burn` adds the
+load.
 
 Re-measured on 2026-10-12 with the `sample` binary, which times `Sampler::tick`
 after the first one: 1.9 to 2.0 ms for the baseline build on this machine, and

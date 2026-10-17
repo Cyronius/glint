@@ -1,9 +1,12 @@
 //! The metric sampler. One PDH query feeds every row.
 //!
-//! Spike 1 measured the whole tick at 0.43 ms mean, so the sampler runs on
-//! the UI thread with no worker and no second poll rate.
+//! A tick is cheap on an idle machine, but `GetIfTable2` alone can take
+//! seconds on a saturated one. `spawn` runs the sampler on its own thread, so
+//! a slow system call delays the next reading and never a tray click
+//! (GLINT-TRAY-RESPONSIVE).
 
-use std::time::Instant;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::{Duration, Instant};
 
 use crate::luid::{parse_engine_instance, AdapterLuid};
 use crate::pdh::{Counter, PdhError, Query};
@@ -482,6 +485,118 @@ impl Sampler {
             metrics.npu = Some(self.npu_sums.busiest());
         }
     }
+}
+
+/// What the machine has, so the UI offers only rows that can show something.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Caps {
+    pub gpu: bool,
+    pub npu: bool,
+    pub temp: bool,
+    pub network: bool,
+}
+
+/// One reading and the hardware it was read from.
+pub struct Sample {
+    pub metrics: Metrics,
+    pub caps: Caps,
+}
+
+/// What the UI tells the sampler thread.
+pub enum Control {
+    /// Change the time between readings, in milliseconds.
+    Period(u32),
+    /// Read now rather than at the end of the wait.
+    Now,
+    /// Rebuild the query after sleep (GLINT-RESUME).
+    Rebuild,
+}
+
+/// The UI's end of the sampler thread. Dropping it stops the thread.
+pub struct Feed {
+    control: Sender<Control>,
+    samples: Receiver<Sample>,
+}
+
+impl Feed {
+    pub fn send(&self, control: Control) {
+        let _ = self.control.send(control);
+    }
+
+    /// Every reading that arrived since the last call, oldest first.
+    pub fn drain(&self) -> impl Iterator<Item = Sample> + '_ {
+        self.samples.try_iter()
+    }
+}
+
+impl Sampler {
+    fn caps(&self) -> Caps {
+        Caps {
+            gpu: self.has_gpu(),
+            npu: self.has_npu(),
+            temp: self.has_temp(),
+            network: self.has_network(),
+        }
+    }
+}
+
+/// Start the sampler on its own thread and wait for it to say what hardware
+/// it found. `notify` runs after each reading is queued.
+///
+/// The thread builds the `Sampler` itself, so PDH handles never change threads.
+pub fn spawn(
+    period_ms: u32,
+    notify: impl Fn() + Send + 'static,
+) -> Result<(Feed, Caps), PdhError> {
+    let (control_tx, control_rx) = mpsc::channel::<Control>();
+    let (sample_tx, sample_rx) = mpsc::channel::<Sample>();
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<Caps, PdhError>>();
+
+    std::thread::spawn(move || {
+        let mut sampler = match Sampler::new() {
+            Ok(sampler) => sampler,
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+        };
+        let _ = ready_tx.send(Ok(sampler.caps()));
+        // The first tick only primes the rate counters.
+        let _ = sampler.tick();
+
+        let mut period = Duration::from_millis(u64::from(period_ms));
+        loop {
+            match control_rx.recv_timeout(period) {
+                Ok(Control::Period(ms)) => {
+                    period = Duration::from_millis(u64::from(ms));
+                    continue;
+                }
+                Ok(Control::Rebuild) => {
+                    let _ = sampler.rebuild();
+                    continue;
+                }
+                Ok(Control::Now) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+            let sample = Sample {
+                metrics: sampler.tick(),
+                caps: sampler.caps(),
+            };
+            if sample_tx.send(sample).is_err() {
+                return;
+            }
+            notify();
+        }
+    });
+
+    let caps = ready_rx.recv().map_err(|_| PdhError(0))??;
+    Ok((
+        Feed {
+            control: control_tx,
+            samples: sample_rx,
+        },
+        caps,
+    ))
 }
 
 /// Physical adapters only: the hardware flag drops filter-layer duplicates and virtual switches.

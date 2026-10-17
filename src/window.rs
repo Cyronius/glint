@@ -48,14 +48,15 @@ use windows::Win32::UI::Controls::{
 
 use crate::config::Config;
 use crate::render::{contains, Hardware, Layout, Renderer, Shown};
-use crate::sampler::{Histories, Metrics, Sampler};
+use crate::sampler::{Caps, Control, Feed, Histories, Metrics};
 
 /// The message the tray sends for icon events.
 const WM_TRAY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
 /// `NIN_SELECT | NINF_KEY`, which the `windows` crate does not export.
 const NIN_KEYSELECT: u32 = NIN_SELECT | 0x1;
 const TRAY_ID: u32 = 1;
-const TIMER_POLL: usize = 1;
+/// The sampler thread posts this after each reading.
+const WM_SAMPLE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
 const TIMER_TRAY_RETRY: usize = 2;
 const TRAY_RETRY_MS: u32 = 2000;
 
@@ -87,7 +88,8 @@ const DONATE_URL: PCWSTR = w!("https://www.kuaf.com/donate");
 
 pub struct App {
     window: HWND,
-    sampler: Sampler,
+    feed: Feed,
+    caps: Caps,
     metrics: Metrics,
     history: Histories,
     renderer: Renderer,
@@ -141,9 +143,6 @@ impl App {
         wnd_class.cbSize = size_of::<WNDCLASSEXW>() as u32;
         unsafe { RegisterClassExW(&wnd_class) };
 
-        let sampler = Sampler::new().map_err(|error| {
-            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
-        })?;
         let config = Config::load();
 
         let window = unsafe {
@@ -163,6 +162,20 @@ impl App {
             )?
         };
 
+        // `HWND` is not `Send`, so the thread gets the raw handle value.
+        let raw_window = window.0 as isize;
+        let (feed, caps) = crate::sampler::spawn(POLL_HIDDEN_MS, move || unsafe {
+            let _ = PostMessageW(
+                Some(HWND(raw_window as *mut core::ffi::c_void)),
+                WM_SAMPLE,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        })
+        .map_err(|error| {
+            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string())
+        })?;
+
         let dpi = unsafe { GetDpiForWindow(window) }.max(96);
         let mut app = Box::new(Self {
             window,
@@ -171,16 +184,17 @@ impl App {
                 Shown::resolve(
                     &config.show,
                     Hardware {
-                        gpu: sampler.has_gpu(),
-                        npu: sampler.has_npu(),
-                        network: sampler.has_network(),
-                        temp: sampler.has_temp(),
+                        gpu: caps.gpu,
+                        npu: caps.npu,
+                        network: caps.network,
+                        temp: caps.temp,
                         volumes: false,
                     },
                 ),
                 0,
             ),
-            sampler,
+            feed,
+            caps,
             metrics: Metrics::default(),
             history: Histories::default(),
             renderer: Renderer::new(),
@@ -202,7 +216,6 @@ impl App {
         app.apply_window_style();
         app.create_tooltips();
         app.add_tray_icon();
-        app.set_poll_rate(POLL_HIDDEN_MS);
         Ok(app)
     }
 
@@ -322,9 +335,7 @@ impl App {
     // ----------------------------------------------------- show and hide ----
 
     fn set_poll_rate(&self, period_ms: u32) {
-        unsafe {
-            SetTimer(Some(self.window), TIMER_POLL, period_ms, None);
-        }
+        self.feed.send(Control::Period(period_ms));
     }
 
     fn show(&mut self) {
@@ -334,8 +345,8 @@ impl App {
         }
         self.visible = true;
         self.set_poll_rate(POLL_VISIBLE_MS);
-        // Sample at once, so the window never opens on a stale reading.
-        self.poll();
+        // The window opens on the last reading and the fresh one follows.
+        self.feed.send(Control::Now);
     }
 
     fn hide(&mut self) {
@@ -359,10 +370,10 @@ impl App {
         Shown::resolve(
             &self.config.show,
             Hardware {
-                gpu: self.sampler.has_gpu(),
-                npu: self.sampler.has_npu(),
-                network: self.sampler.has_network(),
-                temp: self.sampler.has_temp(),
+                gpu: self.caps.gpu,
+                npu: self.caps.npu,
+                network: self.caps.network,
+                temp: self.caps.temp,
                 volumes: !self.metrics.volumes.is_empty(),
             },
         )
@@ -571,9 +582,17 @@ impl App {
 
     // ----------------------------------------------------------- the tick ----
 
-    fn poll(&mut self) {
-        self.metrics = self.sampler.tick();
-        self.history.push(&self.metrics);
+    fn on_samples(&mut self) {
+        let mut any = false;
+        for sample in self.feed.drain() {
+            self.caps = sample.caps;
+            self.history.push(&sample.metrics);
+            self.metrics = sample.metrics;
+            any = true;
+        }
+        if !any {
+            return;
+        }
         self.update_tray();
 
         if !self.visible {
@@ -641,10 +660,10 @@ impl App {
         unsafe {
             let _ = AppendMenuW(menu, ticked(show.cpu), MENU_CPU, w!("CPU"));
             let _ = AppendMenuW(menu, ticked(show.memory), MENU_MEMORY, w!("Memory"));
-            if self.sampler.has_gpu() {
+            if self.caps.gpu {
                 let _ = AppendMenuW(menu, ticked(show.gpu), MENU_GPU, w!("GPU"));
             }
-            if self.sampler.has_npu() {
+            if self.caps.npu {
                 let _ = AppendMenuW(menu, ticked(show.npu), MENU_NPU, w!("NPU"));
             }
             let _ = AppendMenuW(
@@ -653,10 +672,10 @@ impl App {
                 MENU_DISK_ACTIVITY,
                 w!("Disk activity"),
             );
-            if self.sampler.has_network() {
+            if self.caps.network {
                 let _ = AppendMenuW(menu, ticked(show.network), MENU_NETWORK, w!("Network"));
             }
-            if self.sampler.has_temp() {
+            if self.caps.temp {
                 let _ = AppendMenuW(menu, ticked(show.temp), MENU_TEMP, w!("Temperature"));
             }
             let _ = AppendMenuW(
@@ -863,11 +882,13 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        WM_SAMPLE => {
+            app.on_samples();
+            LRESULT(0)
+        }
         WM_TIMER => {
-            match wparam.0 {
-                TIMER_POLL => app.poll(),
-                TIMER_TRAY_RETRY => app.add_tray_icon(),
-                _ => {}
+            if wparam.0 == TIMER_TRAY_RETRY {
+                app.add_tray_icon();
             }
             LRESULT(0)
         }
@@ -946,13 +967,12 @@ unsafe extern "system" fn window_proc(
             // PDH state does not survive sleep. Rebuild the whole query.
             let event = wparam.0 as u32;
             if event == PBT_APMRESUMEAUTOMATIC || event == PBT_APMRESUMESUSPEND {
-                let _ = app.sampler.rebuild();
+                app.feed.send(Control::Rebuild);
             }
             LRESULT(1)
         }
         WM_DESTROY => {
             unsafe {
-                let _ = KillTimer(Some(window), TIMER_POLL);
                 let _ = KillTimer(Some(window), TIMER_TRAY_RETRY);
                 PostQuitMessage(0);
             }

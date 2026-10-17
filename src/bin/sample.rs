@@ -1,7 +1,8 @@
 //! Milestone 2: the sampler with console output, before any UI exists.
 //!
 //! Run `cargo run --release --bin sample`. Compare each number with Task
-//! Manager. Pass a tick count to change the run length, such as `-- 30`.
+//! Manager. Pass a tick count to change the run length, such as `-- 30`, and
+//! `--burn` to keep every logical CPU twice over busy while it runs.
 //!
 //! It opens with a wiring report. A 0% row has two very different causes:
 //! the resource is idle, or the row matches no counter instance at all. The
@@ -74,10 +75,25 @@ fn report_wiring() {
 }
 
 fn main() {
-    let rounds: u32 = std::env::args()
-        .nth(1)
-        .and_then(|a| a.parse().ok())
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let rounds: u32 = args
+        .iter()
+        .find_map(|a| a.parse().ok())
         .unwrap_or(10);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if args.iter().any(|a| a == "--burn") {
+        let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
+        for _ in 0..cpus * 2 {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut x = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    std::hint::black_box(x);
+                }
+            });
+        }
+    }
 
     report_wiring();
 
@@ -86,13 +102,13 @@ fn main() {
         Err(error) => return println!("sampler failed to start: {error}"),
     };
 
-    let mut tick_time = Duration::ZERO;
+    let mut tick_times: Vec<f64> = Vec::new();
     for round in 0..=rounds {
         std::thread::sleep(Duration::from_millis(1000));
         let started = Instant::now();
         let metrics = sampler.tick();
         if round > 0 {
-            tick_time += started.elapsed();
+            tick_times.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         if round == 0 {
             println!("(first tick primes the rate counters)");
@@ -145,8 +161,13 @@ fn main() {
             }
         }
     }
-    println!(
-        "mean tick: {:.3} ms",
-        tick_time.as_secs_f64() * 1000.0 / f64::from(rounds.max(1))
-    );
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    tick_times.sort_by(f64::total_cmp);
+    let mean = tick_times.iter().sum::<f64>() / tick_times.len().max(1) as f64;
+    let p99 = tick_times
+        .get(((tick_times.len() as f64 - 1.0) * 0.99).round().max(0.0) as usize)
+        .copied()
+        .unwrap_or(0.0);
+    let worst = tick_times.last().copied().unwrap_or(0.0);
+    println!("tick: mean {mean:.3} ms, 99th percentile {p99:.1} ms, worst {worst:.1} ms");
 }
